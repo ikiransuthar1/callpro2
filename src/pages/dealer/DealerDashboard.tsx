@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { motion } from 'framer-motion';
-import { Users, FolderOpen, PhoneCall, TrendingUp, ThumbsUp, Activity } from 'lucide-react';
+import { Users, FolderOpen, PhoneCall, TrendingUp, ThumbsUp, Activity, Download } from 'lucide-react';
+import * as XLSX from 'xlsx';
 import { supabase } from '../../lib/supabase';
 import { useAuth } from '../../contexts/AuthContext';
 import type { Profile, Lead, LeadFile, CallLog } from '../../types/database';
@@ -164,6 +165,123 @@ export default function DealerDashboard() {
     },
   ];
 
+  /* ─── Comprehensive Excel Export ─────────────────────────────────────── */
+  const [exporting, setExporting] = useState(false);
+
+  async function handleFullExport() {
+    if (!profile?.dealer_id) return;
+    setExporting(true);
+    try {
+      // 1. Fetch all leads for this dealer (with extra_data JSON)
+      const { data: leadsData, error: leadsErr } = await supabase
+        .from('leads')
+        .select('*')
+        .eq('dealer_id', profile.dealer_id)
+        .order('created_at', { ascending: false });
+      if (leadsErr) throw leadsErr;
+      const allLeads = (leadsData ?? []) as Lead[];
+
+      // 2. Fetch all call_logs for this dealer
+      const { data: logsData, error: logsErr } = await supabase
+        .from('call_logs')
+        .select('*')
+        .eq('dealer_id', profile.dealer_id)
+        .order('called_at', { ascending: false });
+      if (logsErr) throw logsErr;
+      const allLogs = (logsData ?? []) as (CallLog & { caller_id: string })[];
+
+      // 3. Fetch caller profiles to resolve names
+      const { data: callersData } = await supabase
+        .from('profiles')
+        .select('id, email, full_name')
+        .eq('dealer_id', profile.dealer_id)
+        .eq('role', 'caller');
+      const callerMap = new Map((callersData ?? []).map(c => [c.id, c]));
+
+      // 4. Build a map: lead_id → latest call_log
+      const latestLogByLead = new Map<string, (typeof allLogs)[number]>();
+      for (const log of allLogs) {
+        if (!latestLogByLead.has(log.lead_id)) {
+          latestLogByLead.set(log.lead_id, log); // logs already sorted desc by called_at
+        }
+      }
+
+      // 5. Collect ALL extra_data keys across leads (for column order)
+      const extraKeysSet = new Set<string>();
+      for (const lead of allLeads) {
+        if (lead.extra_data) {
+          for (const k of Object.keys(lead.extra_data)) {
+            extraKeysSet.add(k);
+          }
+        }
+      }
+      const extraKeys = Array.from(extraKeysSet);
+
+      // 6. Build export rows
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const exportRows: Record<string, any>[] = allLeads.map((lead) => {
+        const extra = (lead.extra_data ?? {}) as Record<string, string>;
+        const latestLog = latestLogByLead.get(lead.id);
+        const caller = latestLog ? callerMap.get(latestLog.caller_id) : null;
+
+        const row: Record<string, string | number> = {
+          'Customer Name':      lead.customer_name ?? '',
+          'Mobile Number':      lead.phone ?? '',
+          'Registration No.':   lead.vehicle_number ?? '',
+          'Vehicle Model':      lead.vehicle_model ?? '',
+          'Service Type':       lead.service_type ?? '',
+          'Next Service Date':  lead.service_pending_date ? formatDisplayDate(lead.service_pending_date) : '',
+          'Insurance Expiry':   lead.insurance_expiry_date ? formatDisplayDate(lead.insurance_expiry_date) : '',
+          'Address':            lead.address ?? '',
+          'Email':              lead.email ?? '',
+          'Lead Status':        lead.status.replace(/_/g, ' '),
+        };
+
+        // Add all extra_data columns (preserving original Excel column names)
+        for (const k of extraKeys) {
+          row[k] = extra[k] ?? '';
+        }
+
+        // Append call log columns
+        row['Caller Name']      = caller?.full_name ?? caller?.email ?? '';
+        row['Call Date & Time'] = latestLog ? new Date(latestLog.called_at).toLocaleString('en-IN') : '';
+        row['Call Action']      = latestLog ? latestLog.action.replace(/_/g, ' ') : '';
+        row['Reminder Date']    = latestLog?.follow_up_date ? formatDisplayDate(latestLog.follow_up_date) : '';
+        row['Excuse / Notes']   = latestLog?.excuse_notes ?? '';
+
+        return row;
+      });
+
+      // 7. Generate Excel file
+      const ws = XLSX.utils.json_to_sheet(exportRows);
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, 'All Leads + Call Data');
+
+      // Auto-size columns based on content
+      const colWidths = Object.keys(exportRows[0] ?? {}).map((key) => ({
+        wch: Math.max(
+          key.length,
+          ...(exportRows.slice(0, 50).map(r => String(r[key] ?? '').length))
+        ) + 2,
+      }));
+      ws['!cols'] = colWidths;
+
+      const dateStr = new Date().toISOString().split('T')[0];
+      XLSX.writeFile(wb, `leadloom_export_${dateStr}.xlsx`);
+      toast.success(`Exported ${exportRows.length} leads with call data`);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Export failed';
+      toast.error(msg);
+    } finally {
+      setExporting(false);
+    }
+  }
+
+  function formatDisplayDate(dateStr: string): string {
+    const [y, m, d] = dateStr.split('-');
+    return `${d}/${m}/${y}`;
+  }
+
   return (
     <div className="min-h-screen bg-[#080C14] p-8">
       {/* Header */}
@@ -171,12 +289,26 @@ export default function DealerDashboard() {
         initial={{ opacity: 0, y: -16 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.4 }}
-        className="mb-8"
+        className="mb-8 flex items-start justify-between gap-4 flex-wrap"
       >
-        <h1 className="text-3xl font-bold text-white tracking-tight">Dealer Dashboard</h1>
-        <p className="text-slate-400 mt-1 text-sm">
-          Welcome back, {profile?.full_name ?? profile?.email}
-        </p>
+        <div>
+          <h1 className="text-3xl font-bold text-white tracking-tight">Dealer Dashboard</h1>
+          <p className="text-slate-400 mt-1 text-sm">
+            Welcome back, {profile?.full_name ?? profile?.email}
+          </p>
+        </div>
+        <button
+          onClick={handleFullExport}
+          disabled={exporting}
+          className="flex items-center gap-2 px-4 py-2.5 bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-white text-sm font-semibold rounded-xl transition-all shadow-lg shadow-cyan-500/20 disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          {exporting ? (
+            <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+          ) : (
+            <Download className="w-4 h-4" />
+          )}
+          {exporting ? 'Exporting…' : 'Export Full Excel'}
+        </button>
       </motion.div>
 
       {/* Stat Cards */}

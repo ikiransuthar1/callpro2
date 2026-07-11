@@ -4,18 +4,18 @@ import {
   Phone, Car, Calendar, Clock, CheckCircle, XCircle, PhoneOff,
   PhoneMissed, PhoneCall, ChevronDown, ChevronUp, Zap, Target,
   TrendingUp, Filter, Save, AlertTriangle, SkipForward, Inbox,
-  MessageCircle, Gauge, Wrench, MapPin, Mail, Building2,
+  MessageCircle, Gauge, Wrench, MapPin, Mail, Building2, FileSpreadsheet, X,
 } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { supabase } from '../../lib/supabase';
 import { useAuth } from '../../contexts/AuthContext';
-import type { Lead, CallAction } from '../../types/database';
+import type { Lead, CallAction, LeadFile } from '../../types/database';
 
 /* ─── Types ──────────────────────────────────────────────────────────────── */
 interface Filters {
   serviceType: string;
-  dateFilter: 'none' | 'service_pending' | 'insurance_expiry';
-  daysAhead: number;
+  serviceDate: string; // exact date picker YYYY-MM-DD or ''
+  fileId: string;      // selected lead_file id or ''
 }
 
 /* ─── Helpers ─────────────────────────────────────────────────────────────── */
@@ -74,24 +74,48 @@ function StatPill({ icon: Icon, label, value, accent }: { icon: React.ElementTyp
   );
 }
 
+const LOCK_TIMEOUT_MS = 2 * 60 * 1000; // 2 minutes
+const HEARTBEAT_INTERVAL_MS = 30 * 1000; // 30 seconds
+
 /* ─── Main Component ─────────────────────────────────────────────────────── */
 export default function CallerWorkspace() {
   const { profile } = useAuth();
 
   const [currentLead, setCurrentLead] = useState<Lead | null>(null);
-  const [leadIndex, setLeadIndex] = useState(0);
   const [totalPending, setTotalPending] = useState(0);
   const [callsToday, setCallsToday] = useState(0);
   const [interestedToday, setInterestedToday] = useState(0);
   const [selectedAction, setSelectedAction] = useState<CallAction | ''>('');
   const [notes, setNotes] = useState('');
   const [followUpDate, setFollowUpDate] = useState('');
-  const [filters, setFilters] = useState<Filters>({ serviceType: 'ALL', dateFilter: 'none', daysAhead: 1 });
+  const [filters, setFilters] = useState<Filters>({ serviceType: 'ALL', serviceDate: '', fileId: '' });
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [loading, setLoading] = useState(true);
-  const [direction, setDirection] = useState(1);
+
+  // Lead files list (read-only)
+  const [leadFiles, setLeadFiles] = useState<LeadFile[]>([]);
+
+  // Lead locking refs
+  const currentLeadRef = useRef<Lead | null>(null);
+  const heartbeatTimer = useRef<ReturnType<typeof setInterval> | null>(null);
   const notesRef = useRef<HTMLTextAreaElement>(null);
+
+  // Keep ref in sync for cleanup
+  useEffect(() => { currentLeadRef.current = currentLead; }, [currentLead]);
+
+  /* ─── Fetch lead files (read-only dropdown) ──────────────────────────── */
+  const fetchLeadFiles = useCallback(async () => {
+    if (!profile?.dealer_id) return;
+    const { data } = await supabase
+      .from('lead_files')
+      .select('id, file_name, original_name, total_records, created_at')
+      .eq('dealer_id', profile.dealer_id)
+      .order('created_at', { ascending: false });
+    if (data) setLeadFiles(data as LeadFile[]);
+  }, [profile?.dealer_id]);
+
+  useEffect(() => { fetchLeadFiles(); }, [fetchLeadFiles]);
 
   /* ─── Fetch today stats ──────────────────────────────────────────────── */
   const fetchTodayStats = useCallback(async () => {
@@ -107,49 +131,114 @@ export default function CallerWorkspace() {
     }
   }, [profile?.id]);
 
-  /* ─── Build query ────────────────────────────────────────────────────── */
-  const buildQuery = useCallback(() => {
-    if (!profile?.dealer_id) return null;
-    let q = supabase.from('leads').select('*', { count: 'exact' })
-      .eq('dealer_id', profile.dealer_id)
-      .eq('status', 'pending')
-      .order('sort_order', { ascending: true });
-    if (filters.serviceType !== 'ALL') q = q.eq('service_type', filters.serviceType);
-    if (filters.dateFilter === 'service_pending') {
-      const d = new Date(); d.setDate(d.getDate() + filters.daysAhead);
-      q = q.eq('service_pending_date', d.toISOString().split('T')[0]);
-    } else if (filters.dateFilter === 'insurance_expiry') {
-      const d = new Date(); d.setDate(d.getDate() + filters.daysAhead);
-      q = q.eq('insurance_expiry_date', d.toISOString().split('T')[0]);
-    }
-    return q;
-  }, [profile?.dealer_id, filters]);
+  /* ─── Lock management ────────────────────────────────────────────────── */
+  const startHeartbeat = useCallback((leadId: string) => {
+    if (heartbeatTimer.current) clearInterval(heartbeatTimer.current);
+    heartbeatTimer.current = setInterval(async () => {
+      if (!profile?.id) return;
+      const { error } = await supabase
+        .from('leads')
+        .update({ locked_at: new Date().toISOString() })
+        .eq('id', leadId)
+        .eq('locked_by', profile.id);
+      if (error) {
+        // Lock might have been released by stale-locks sweeper; stop heartbeat
+        if (heartbeatTimer.current) clearInterval(heartbeatTimer.current);
+      }
+    }, HEARTBEAT_INTERVAL_MS);
+  }, [profile?.id]);
 
-  /* ─── Fetch lead ─────────────────────────────────────────────────────── */
-  const fetchLead = useCallback(async (skip = 0) => {
+  const stopHeartbeat = useCallback(() => {
+    if (heartbeatTimer.current) {
+      clearInterval(heartbeatTimer.current);
+      heartbeatTimer.current = null;
+    }
+  }, []);
+
+  const releaseLock = useCallback(async (leadId: string) => {
+    if (!profile?.id) return;
+    stopHeartbeat();
+    await supabase.rpc('unlock_lead', { p_lead_id: leadId, p_caller_id: profile.id });
+  }, [profile?.id, stopHeartbeat]);
+
+  /* ─── Claim next lead (atomic via SECURITY DEFINER function) ─────────── */
+  const fetchNextLead = useCallback(async () => {
+    if (!profile?.dealer_id || !profile?.id) return;
     setLoading(true);
     try {
-      const q = buildQuery();
-      if (!q) { setLoading(false); return; }
-      const { data, count } = await q.range(skip, skip).maybeSingle();
-      setTotalPending(count ?? 0);
-      setCurrentLead(data ?? null);
-      setLeadIndex(skip + 1);
-    } catch (err) {
-      toast.error('Failed to load lead');
-    } finally { setLoading(false); }
-  }, [buildQuery]);
+      // Release any previous lock before claiming a new one
+      if (currentLeadRef.current) {
+        await releaseLock(currentLeadRef.current.id);
+      }
 
-  const refreshCount = useCallback(async () => {
-    const q = buildQuery(); if (!q) return;
-    const { count } = await q.limit(1);
-    setTotalPending(count ?? 0);
-  }, [buildQuery]);
+      // Convert date filter to YYYY-MM-DD for exact match
+      const serviceDate = filters.serviceDate || null;
+
+      const { data, error } = await supabase.rpc('claim_next_lead', {
+        p_dealer_id: profile.dealer_id,
+        p_caller_id: profile.id,
+        p_service_type: filters.serviceType === 'ALL' ? null : filters.serviceType,
+        p_file_id: filters.fileId || null,
+        p_service_date: serviceDate,
+      });
+
+      if (error) throw error;
+
+      const lead = data as unknown as Lead | null;
+      setCurrentLead(lead ?? null);
+      if (lead) {
+        startHeartbeat(lead.id);
+      } else {
+        stopHeartbeat();
+      }
+
+      // Get pending count (unlocked leads only)
+      let countQuery = supabase.from('leads')
+        .select('id', { count: 'exact', head: true })
+        .eq('dealer_id', profile.dealer_id)
+        .eq('status', 'pending')
+        .is('locked_by', null);
+      if (filters.serviceType !== 'ALL') countQuery = countQuery.eq('service_type', filters.serviceType);
+      if (filters.fileId) countQuery = countQuery.eq('file_id', filters.fileId);
+      if (filters.serviceDate) countQuery = countQuery.eq('service_pending_date', filters.serviceDate);
+      const { count } = await countQuery;
+      setTotalPending(count ?? 0);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to load lead');
+    } finally {
+      setLoading(false);
+    }
+  }, [profile?.dealer_id, profile?.id, filters, releaseLock, startHeartbeat, stopHeartbeat]);
 
   useEffect(() => {
-    fetchLead(0);
+    fetchNextLead();
     fetchTodayStats();
-  }, [filters]); // eslint-disable-line
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filters]);
+
+  /* ─── Release lock on unmount / tab close ────────────────────────────── */
+  useEffect(() => {
+    const handleUnload = () => {
+      // Synchronous best-effort release via sendBeacon
+      const lead = currentLeadRef.current;
+      if (!lead || !profile?.id) return;
+      const body = JSON.stringify({ p_lead_id: lead.id, p_caller_id: profile.id });
+      const url = `${import.meta.env.VITE_SUPABASE_URL}/rest/v1/rpc/unlock_lead`;
+      try {
+        navigator.sendBeacon(url, new Blob([body], { type: 'application/json' }));
+      } catch { /* best-effort */ }
+    };
+    window.addEventListener('beforeunload', handleUnload);
+    return () => {
+      window.removeEventListener('beforeunload', handleUnload);
+      // Also release on component unmount (SPA navigation)
+      if (currentLeadRef.current && profile?.id) {
+        releaseLock(currentLeadRef.current.id);
+      }
+      stopHeartbeat();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [profile?.id]);
 
   /* ─── Keyboard shortcut ──────────────────────────────────────────────── */
   useEffect(() => {
@@ -164,7 +253,7 @@ export default function CallerWorkspace() {
     return () => window.removeEventListener('keydown', handler);
   }, [selectedAction, notes, followUpDate, currentLead]); // eslint-disable-line
 
-  /* ─── Save ───────────────────────────────────────────────────────────── */
+  /* ─── Save action ────────────────────────────────────────────────────── */
   const handleSave = async () => {
     if (!currentLead || !selectedAction || !profile) return;
     if (selectedAction === 'call_later' && !followUpDate) { toast.error('Pick a follow-up date'); return; }
@@ -190,17 +279,28 @@ export default function CallerWorkspace() {
         selectedAction === 'call_later'     ? 'follow_up' :
         selectedAction === 'completed'      ? 'completed' : 'called';
 
+      // Update status AND release the lock in one operation
       const { error: leadErr } = await supabase.from('leads')
-        .update({ status: newStatus } as never).eq('id', currentLead.id);
+        .update({ status: newStatus, locked_by: null, locked_at: null } as never)
+        .eq('id', currentLead.id);
       if (leadErr) throw leadErr;
 
+      stopHeartbeat();
       toast.success('Saved! Loading next…', { duration: 1500 });
-      setSelectedAction(''); setNotes(''); setFollowUpDate(''); setDirection(1);
+      setSelectedAction(''); setNotes(''); setFollowUpDate('');
       await fetchTodayStats();
-      await fetchLead(0);
+      await fetchNextLead();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Save failed');
     } finally { setSaving(false); }
+  };
+
+  /* ─── Skip lead (release lock, get next) ─────────────────────────────── */
+  const handleSkip = async () => {
+    if (!currentLead) return;
+    await releaseLock(currentLead.id);
+    toast('Lead skipped — released to queue', { icon: '↩', duration: 1500 });
+    await fetchNextLead();
   };
 
   /* ─── Derived values ─────────────────────────────────────────────────── */
@@ -208,20 +308,19 @@ export default function CallerWorkspace() {
   const badge = currentLead ? svcBadgeStyle(currentLead.service_type) : null;
   const svcDate = currentLead ? formatRelativeDate(currentLead.service_pending_date) : null;
   const insDate = currentLead ? formatRelativeDate(currentLead.insurance_expiry_date) : null;
-  const progressPct = totalPending > 0 ? Math.round(((leadIndex - 1) / (leadIndex - 1 + totalPending)) * 100) : 100;
-  const todayStr = new Date().toISOString().split('T')[0];
   const selectedMeta = ACTION_OPTIONS.find(a => a.value === selectedAction);
+  const todayStr = new Date().toISOString().split('T')[0];
 
-  // Collect last service info from extra_data
   const lastSvcDate = extra['Last Service Date'] || null;
   const lastSvcKms  = extra['Last Service Kms'] || null;
   const lastSvcType = extra['Last Service Type'] || null;
   const vehicleType = extra['Vehicle Type'] || null;
   const sellerName  = extra['Selling Dealer Name'] || null;
 
-  // All extra keys not already displayed
   const knownExtraKeys = new Set(['Last Service Date', 'Last Service Kms', 'Last Service Type', 'Vehicle Type', 'Selling Dealer Name']);
   const otherExtras = Object.entries(extra).filter(([k]) => !knownExtraKeys.has(k) && k && extra[k]);
+
+  const hasActiveFilters = filters.serviceType !== 'ALL' || filters.serviceDate !== '' || filters.fileId !== '';
 
   return (
     <div className="min-h-screen bg-[#080C14] p-6 lg:p-8">
@@ -242,20 +341,6 @@ export default function CallerWorkspace() {
         </div>
       </div>
 
-      {/* ── Progress ─────────────────────────────────────────────────────── */}
-      <div className="mb-5">
-        <div className="flex justify-between mb-1.5">
-          <span className="text-xs text-slate-400 font-medium">
-            {totalPending === 0 ? 'Queue complete!' : `Lead ${leadIndex} of ${leadIndex - 1 + totalPending}`}
-          </span>
-          <span className="text-xs text-cyan-400 font-bold">{progressPct}% done</span>
-        </div>
-        <div className="h-1.5 bg-slate-800 rounded-full overflow-hidden">
-          <motion.div className="h-full bg-gradient-to-r from-cyan-500 to-blue-500 rounded-full"
-            animate={{ width: `${progressPct}%` }} transition={{ duration: 0.6, ease: 'easeOut' }} />
-        </div>
-      </div>
-
       {/* ── Filters ──────────────────────────────────────────────────────── */}
       <div className="bg-slate-900/80 backdrop-blur border border-white/[0.08] rounded-2xl mb-6 overflow-hidden">
         <button onClick={() => setFiltersOpen(v => !v)}
@@ -263,11 +348,21 @@ export default function CallerWorkspace() {
           <span className="flex items-center gap-2">
             <Filter className="w-4 h-4 text-cyan-400" />
             Filters
-            {(filters.serviceType !== 'ALL' || filters.dateFilter !== 'none') && (
+            {hasActiveFilters && (
               <span className="text-[10px] px-1.5 py-0.5 bg-cyan-500/20 text-cyan-400 border border-cyan-500/30 rounded-full font-bold">ACTIVE</span>
             )}
           </span>
-          {filtersOpen ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+          <div className="flex items-center gap-2">
+            {hasActiveFilters && (
+              <button
+                onClick={(e) => { e.stopPropagation(); setFilters({ serviceType: 'ALL', serviceDate: '', fileId: '' }); }}
+                className="text-xs text-slate-500 hover:text-red-400 transition-colors"
+              >
+                Clear all
+              </button>
+            )}
+            {filtersOpen ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+          </div>
         </button>
 
         <AnimatePresence>
@@ -275,6 +370,7 @@ export default function CallerWorkspace() {
             <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: 'auto', opacity: 1 }}
               exit={{ height: 0, opacity: 0 }} transition={{ duration: 0.2 }} className="overflow-hidden">
               <div className="px-5 pb-5 pt-1 border-t border-white/[0.06] grid grid-cols-1 sm:grid-cols-3 gap-4">
+
                 {/* Service type */}
                 <div>
                   <label className="text-[10px] text-slate-500 uppercase tracking-wider font-medium block mb-1.5">Service Type</label>
@@ -293,32 +389,41 @@ export default function CallerWorkspace() {
                     })}
                   </div>
                 </div>
-                {/* Date filter */}
+
+                {/* Next Service Date — exact match */}
                 <div>
-                  <label className="text-[10px] text-slate-500 uppercase tracking-wider font-medium block mb-1.5">Date Filter</label>
-                  <select value={filters.dateFilter}
-                    onChange={e => setFilters(f => ({ ...f, dateFilter: e.target.value as Filters['dateFilter'] }))}
-                    className="w-full bg-slate-800 border border-white/[0.08] rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-cyan-500/50">
-                    <option value="none">No date filter</option>
-                    <option value="service_pending">Next Service Date</option>
-                    <option value="insurance_expiry">Insurance Expiry</option>
-                  </select>
-                </div>
-                {/* Days ahead */}
-                {filters.dateFilter !== 'none' && (
-                  <div>
-                    <label className="text-[10px] text-slate-500 uppercase tracking-wider font-medium block mb-1.5">Days Ahead</label>
-                    <select value={filters.daysAhead}
-                      onChange={e => setFilters(f => ({ ...f, daysAhead: Number(e.target.value) }))}
-                      className="w-full bg-slate-800 border border-white/[0.08] rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-cyan-500/50">
-                      <option value={0}>Today</option>
-                      <option value={1}>Tomorrow</option>
-                      <option value={2}>In 2 days</option>
-                      <option value={3}>In 3 days</option>
-                      <option value={7}>In 7 days</option>
-                    </select>
+                  <label className="text-[10px] text-slate-500 uppercase tracking-wider font-medium block mb-1.5">
+                    Next Service Date (exact)
+                  </label>
+                  <div className="flex items-center gap-2">
+                    <input type="date" value={filters.serviceDate}
+                      onChange={e => setFilters(f => ({ ...f, serviceDate: e.target.value }))}
+                      className="flex-1 bg-slate-800 border border-white/[0.08] rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-cyan-500/50" />
+                    {filters.serviceDate && (
+                      <button onClick={() => setFilters(f => ({ ...f, serviceDate: '' }))}
+                        className="shrink-0 w-8 h-8 flex items-center justify-center text-slate-500 hover:text-red-400 hover:bg-red-500/10 rounded-lg transition-colors">
+                        <X className="w-4 h-4" />
+                      </button>
+                    )}
                   </div>
-                )}
+                  <p className="text-[10px] text-slate-600 mt-1">Shows only leads matching this exact date</p>
+                </div>
+
+                {/* Lead File dropdown */}
+                <div>
+                  <label className="text-[10px] text-slate-500 uppercase tracking-wider font-medium block mb-1.5 flex items-center gap-1.5">
+                    <FileSpreadsheet className="w-3 h-3" /> Lead File
+                  </label>
+                  <select value={filters.fileId}
+                    onChange={e => setFilters(f => ({ ...f, fileId: e.target.value }))}
+                    className="w-full bg-slate-800 border border-white/[0.08] rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-cyan-500/50">
+                    <option value="">All files</option>
+                    {leadFiles.map(f => (
+                      <option key={f.id} value={f.id}>{f.file_name}</option>
+                    ))}
+                  </select>
+                  <p className="text-[10px] text-slate-600 mt-1">Filter by uploaded file</p>
+                </div>
               </div>
             </motion.div>
           )}
@@ -345,9 +450,21 @@ export default function CallerWorkspace() {
             <CheckCircle className="w-7 h-7 text-emerald-400" />
           </div>
           <div className="text-center">
-            <h2 className="text-lg font-semibold text-white">Queue Complete!</h2>
-            <p className="text-sm text-slate-400 mt-1">All leads have been worked through.</p>
+            <h2 className="text-lg font-semibold text-white">
+              {hasActiveFilters ? 'No leads match your filters' : 'Queue Complete!'}
+            </h2>
+            <p className="text-sm text-slate-400 mt-1">
+              {hasActiveFilters
+                ? 'Try clearing filters to see more leads.'
+                : 'All leads have been worked through or are being handled by other callers.'}
+            </p>
           </div>
+          {hasActiveFilters && (
+            <button onClick={() => setFilters({ serviceType: 'ALL', serviceDate: '', fileId: '' })}
+              className="px-4 py-2 text-sm bg-cyan-500/10 border border-cyan-500/30 text-cyan-400 rounded-xl hover:bg-cyan-500/20 transition-colors">
+              Clear filters
+            </button>
+          )}
           <div className="flex gap-3 mt-2">
             <div className="text-center px-6 py-3 bg-slate-900/80 border border-white/[0.08] rounded-xl">
               <p className="text-2xl font-bold text-cyan-400">{callsToday}</p>
@@ -363,11 +480,11 @@ export default function CallerWorkspace() {
 
       {/* ── Main workspace ────────────────────────────────────────────────── */}
       {!loading && currentLead && (
-        <AnimatePresence mode="wait" custom={direction}>
-          <motion.div key={currentLead.id} custom={direction}
-            initial={{ opacity: 0, x: direction * 50 }}
+        <AnimatePresence mode="wait">
+          <motion.div key={currentLead.id}
+            initial={{ opacity: 0, x: 50 }}
             animate={{ opacity: 1, x: 0 }}
-            exit={{ opacity: 0, x: direction * -50 }}
+            exit={{ opacity: 0, x: -50 }}
             transition={{ duration: 0.3, ease: [0.25, 0.46, 0.45, 0.94] }}
             className="grid grid-cols-1 lg:grid-cols-[1fr_380px] gap-5 max-w-5xl mx-auto"
           >
@@ -383,14 +500,11 @@ export default function CallerWorkspace() {
 
               {/* Header */}
               <div className="px-6 pt-5 pb-4">
-                {/* Service type label */}
                 {currentLead.service_type && badge && (
                   <p className={`text-[10px] font-bold tracking-[0.12em] uppercase mb-2 ${badge.header}`}>
                     {currentLead.service_type} Customer
                   </p>
                 )}
-
-                {/* Name + badge */}
                 <div className="flex items-start gap-3 justify-between">
                   <h2 className="text-2xl font-bold text-white leading-tight tracking-tight">
                     {currentLead.customer_name || 'Unknown Customer'}
@@ -402,8 +516,6 @@ export default function CallerWorkspace() {
                     </span>
                   )}
                 </div>
-
-                {/* Phone */}
                 {currentLead.phone && (
                   <a href={`tel:${currentLead.phone}`}
                     className="inline-flex items-center gap-1.5 mt-2 text-cyan-400 hover:text-cyan-300 font-mono text-base font-semibold transition-colors">
@@ -438,9 +550,7 @@ export default function CallerWorkspace() {
                     <p className="text-[10px] text-slate-500 font-semibold uppercase tracking-wider mb-2.5 flex items-center gap-1.5">
                       <Wrench className="w-3 h-3" /> Last Service
                     </p>
-                    {lastSvcDate && (
-                      <p className="text-sm font-bold text-white">{lastSvcDate}</p>
-                    )}
+                    {lastSvcDate && <p className="text-sm font-bold text-white">{lastSvcDate}</p>}
                     {(lastSvcKms || lastSvcType) && (
                       <p className="text-xs text-slate-400 mt-0.5">
                         {lastSvcKms && <span>{lastSvcKms} Kms</span>}
@@ -628,7 +738,7 @@ export default function CallerWorkspace() {
                   {!saving && <TrendingUp className="w-3.5 h-3.5 opacity-70" />}
                 </motion.button>
 
-                <button onClick={async () => { setDirection(1); await fetchLead(leadIndex); }}
+                <button onClick={handleSkip}
                   className="w-full flex items-center justify-center gap-1.5 py-2.5 text-xs text-slate-500 hover:text-slate-300 border border-white/[0.06] rounded-xl hover:bg-white/[0.03] transition-all">
                   <SkipForward className="w-3.5 h-3.5" />
                   Skip this lead

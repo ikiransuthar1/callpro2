@@ -56,6 +56,8 @@ export interface Lead {
   extra_data: Record<string, unknown> | null;
   status: LeadStatus;
   assigned_caller_id: string | null;
+  locked_by: string | null;
+  locked_at: string | null;
   sort_order: number;
   created_at: string;
   updated_at: string;

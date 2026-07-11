@@ -55,8 +55,7 @@ export default function LoginPage() {
                 <Phone className="w-6 h-6 text-white" />
               </div>
             </div>
-            <span className="text-2xl font-bold text-white tracking-tight">CallPro</span>
-            <span className="text-xs font-medium bg-cyan-400/10 text-cyan-400 border border-cyan-400/20 px-2 py-0.5 rounded-full">SaaS</span>
+            <span className="text-2xl font-bold text-white tracking-tight">LeadLoom</span>
           </motion.div>
           <p className="text-slate-400 text-sm">Sign in to your workspace</p>
         </div>
@@ -122,7 +121,7 @@ export default function LoginPage() {
         </div>
 
         <p className="text-center text-xs text-slate-600 mt-6">
-          CallPro &copy; {new Date().getFullYear()} — Multi-tier SaaS Platform
+          LeadLoom &copy; {new Date().getFullYear()} — Lead Management & Calling Platform
         </p>
       </motion.div>
     </div>

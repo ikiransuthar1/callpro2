@@ -79,7 +79,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
                 transition={{ duration: 0.2 }}
                 className="text-lg font-bold text-white tracking-tight whitespace-nowrap"
               >
-                CallPro
+                LeadLoom
               </motion.span>
             )}
           </AnimatePresence>
