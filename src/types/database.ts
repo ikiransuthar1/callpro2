@@ -1,3 +1,4 @@
+// Updated on 11 July
 export type UserRole = 'founder' | 'dealer' | 'caller';
 export type UserStatus = 'active' | 'blocked';
 export type SubscriptionStatus = 'active' | 'suspended' | 'cancelled';
