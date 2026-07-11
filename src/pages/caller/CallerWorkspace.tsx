@@ -192,17 +192,18 @@ export default function CallerWorkspace() {
         stopHeartbeat();
       }
 
-      // Get pending count (unlocked leads only)
-      let countQuery = supabase.from('leads')
-        .select('id', { count: 'exact', head: true })
-        .eq('dealer_id', profile.dealer_id)
-        .eq('status', 'pending')
-        .is('locked_by', null);
-      if (filters.serviceType !== 'ALL') countQuery = countQuery.eq('service_type', filters.serviceType);
-      if (filters.fileId) countQuery = countQuery.eq('file_id', filters.fileId);
-      if (filters.serviceDate) countQuery = countQuery.eq('service_pending_date', filters.serviceDate);
-      const { count } = await countQuery;
-      setTotalPending(count ?? 0);
+      // Get pending count via RPC — checks both service_pending_date AND extra_data->>'Next Service Date'
+      const { data: countResult, error: countErr } = await supabase.rpc('count_available_leads', {
+        p_dealer_id: profile.dealer_id,
+        p_service_type: filters.serviceType === 'ALL' ? null : filters.serviceType,
+        p_file_id: filters.fileId || null,
+        p_service_date: filters.serviceDate || null,
+      });
+      if (countErr) {
+        setTotalPending(0);
+      } else {
+        setTotalPending((countResult as number) ?? 0);
+      }
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Failed to load lead');
     } finally {
