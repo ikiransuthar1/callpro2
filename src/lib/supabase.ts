@@ -1,3 +1,4 @@
+// Updated on 11 July
 import { createClient } from '@supabase/supabase-js';
 import type { Database } from '../types/database';
 
