@@ -517,8 +517,8 @@ export default function LeadFiles() {
                   <p className="text-xs text-slate-300 truncate">
                     <span className="text-slate-500">Name:</span> {parsedData.rows[0][mapping.customer_name ?? ''] || '—'} &nbsp;
                     <span className="text-slate-500">Phone:</span> {parsedData.rows[0][mapping.phone ?? ''] || '—'} &nbsp;
-                    <span className="text-slate-500">Service:</span> {parsedData.rows[0][mapping.service_type ?? ''] || '—'} &nbsp;
-                    <span className="text-slate-500">Date:</span> {parsedData.rows[0][mapping.service_pending_date ?? ''] || '—'}
+                    <span className="text-slate-500">Service:</span> {parsedData.rows[0][mapping.next_service_type ?? ''] || '—'} &nbsp;
+                    <span className="text-slate-500">Date:</span> {parsedData.rows[0][mapping.next_service_date ?? ''] || '—'}
                   </p>
                 </div>
               )}
