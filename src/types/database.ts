@@ -49,8 +49,14 @@ export interface Lead {
   phone: string | null;
   vehicle_number: string | null;
   vehicle_model: string | null;
+  /** Legacy column — kept for back-compat. Use next_service_type for new data. */
   service_type: string | null;
+  /** Legacy column — kept for back-compat. Use next_service_date for new data. */
   service_pending_date: string | null;
+  /** Canonical "Next Service Type" (e.g. FREE 01, PAID). Populated from upload. */
+  next_service_type: string | null;
+  /** Canonical "Next Service Date" stored as YYYY-MM-DD. Populated from upload. */
+  next_service_date: string | null;
   insurance_expiry_date: string | null;
   address: string | null;
   email: string | null;

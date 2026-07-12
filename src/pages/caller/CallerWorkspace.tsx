@@ -93,6 +93,7 @@ export default function CallerWorkspace() {
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [dealerName, setDealerName] = useState<string | null>(null);
 
   // Lead files list (read-only)
   const [leadFiles, setLeadFiles] = useState<LeadFile[]>([]);
@@ -104,6 +105,19 @@ export default function CallerWorkspace() {
 
   // Keep ref in sync for cleanup
   useEffect(() => { currentLeadRef.current = currentLead; }, [currentLead]);
+
+  /* ─── Fetch dealer name for WhatsApp message ────────────────────────── */
+  useEffect(() => {
+    if (!profile?.dealer_id) return;
+    supabase
+      .from('dealers')
+      .select('company_name')
+      .eq('id', profile.dealer_id)
+      .maybeSingle()
+      .then(({ data }) => {
+        if (data?.company_name) setDealerName(data.company_name);
+      });
+  }, [profile?.dealer_id]);
 
   /* ─── Fetch lead files (read-only dropdown) ──────────────────────────── */
   const fetchLeadFiles = useCallback(async () => {
@@ -305,11 +319,44 @@ export default function CallerWorkspace() {
     await fetchNextLead();
   };
 
+  /* ─── WhatsApp pre-filled message ───────────────────────────────────── */
+  const handleWhatsApp = () => {
+    if (!currentLead) return;
+
+    // Prefer new canonical columns; fall back to legacy ones
+    const custName    = currentLead.customer_name   ?? 'Customer';
+    const model       = currentLead.vehicle_model   ?? 'Vehicle';
+    const svcType     = currentLead.next_service_type ?? currentLead.service_type ?? 'Service';
+    const rawDate     = currentLead.next_service_date ?? currentLead.service_pending_date;
+    const dealer      = dealerName ?? 'Showroom';
+
+    // Format date as DD-MM-YYYY for the message
+    let formattedDate = 'N/A';
+    if (rawDate) {
+      const [y, m, d] = rawDate.split('-');
+      formattedDate = `${d}-${m}-${y}`;
+    }
+
+    const message =
+      `Hello Dear, ${custName} Apki HONDA ${model} Ki ${svcType} Service ${formattedDate} ko Schedule he ` +
+      `Toh Kripya Samay se Pahle Showroom par ake Apni Service Karvaye. ${dealer}`;
+
+    // Strip non-digit chars; prepend India country code for 10-digit numbers
+    let phone = (currentLead.phone ?? '').replace(/\D/g, '');
+    if (phone.length === 10) phone = '91' + phone;
+
+    const url = `https://wa.me/${phone}?text=${encodeURIComponent(message)}`;
+    window.open(url, '_blank', 'noopener,noreferrer');
+  };
+
   /* ─── Derived values ─────────────────────────────────────────────────── */
+  // Prefer new canonical columns; fall back to legacy for old data
   const extra = (currentLead?.extra_data ?? {}) as Record<string, string>;
-  const badge = currentLead ? svcBadgeStyle(currentLead.service_type) : null;
-  const svcDate = currentLead ? formatRelativeDate(currentLead.service_pending_date) : null;
-  const insDate = currentLead ? formatRelativeDate(currentLead.insurance_expiry_date) : null;
+  const badge = currentLead ? svcBadgeStyle(currentLead.next_service_type ?? currentLead.service_type) : null;
+  const effectiveSvcDate = currentLead?.next_service_date ?? currentLead?.service_pending_date ?? null;
+  const effectiveSvcType = currentLead?.next_service_type ?? currentLead?.service_type ?? null;
+  const svcDate  = effectiveSvcDate ? formatRelativeDate(effectiveSvcDate) : null;
+  const insDate  = currentLead ? formatRelativeDate(currentLead.insurance_expiry_date) : null;
   const selectedMeta = ACTION_OPTIONS.find(a => a.value === selectedAction);
   const todayStr = new Date().toISOString().split('T')[0];
 
@@ -502,19 +549,19 @@ export default function CallerWorkspace() {
 
               {/* Header */}
               <div className="px-6 pt-5 pb-4">
-                {currentLead.service_type && badge && (
+                {effectiveSvcType && badge && (
                   <p className={`text-[10px] font-bold tracking-[0.12em] uppercase mb-2 ${badge.header}`}>
-                    {currentLead.service_type} Customer
+                    {effectiveSvcType} Customer
                   </p>
                 )}
                 <div className="flex items-start gap-3 justify-between">
                   <h2 className="text-2xl font-bold text-white leading-tight tracking-tight">
                     {currentLead.customer_name || 'Unknown Customer'}
                   </h2>
-                  {badge && currentLead.service_type && (
+                  {badge && effectiveSvcType && (
                     <span className={`shrink-0 flex items-center gap-1.5 px-3 py-1 rounded-full border text-xs font-bold ${badge.bg}`}>
                       <span className={`w-1.5 h-1.5 rounded-full ${badge.dot}`} />
-                      {currentLead.service_type}
+                      {effectiveSvcType}
                     </span>
                   )}
                 </div>
@@ -564,25 +611,30 @@ export default function CallerWorkspace() {
                 )}
 
                 {/* Next Service Due */}
-                {currentLead.service_pending_date && (
+                {effectiveSvcDate && (
                   <div className={`col-span-2 rounded-xl p-3.5 border ${
-                    svcDate?.urgency === 'red' ? 'bg-red-500/10 border-red-500/20' :
+                    svcDate?.urgency === 'red'   ? 'bg-red-500/10 border-red-500/20' :
                     svcDate?.urgency === 'amber' ? 'bg-amber-500/10 border-amber-500/20' :
                     'bg-emerald-500/8 border-emerald-500/15'
                   }`}>
                     <p className="text-[10px] text-slate-500 font-semibold uppercase tracking-wider mb-1.5 flex items-center gap-1.5">
-                      <Calendar className="w-3 h-3" /> Due Next Service
+                      <Calendar className="w-3 h-3" /> Next Service Due
+                      {effectiveSvcType && (
+                        <span className={`ml-auto px-2 py-0.5 rounded-full border text-[10px] font-bold ${badge?.bg}`}>
+                          {effectiveSvcType}
+                        </span>
+                      )}
                     </p>
                     <div className="flex items-center justify-between">
                       <p className={`text-xl font-bold ${
-                        svcDate?.urgency === 'red' ? 'text-red-300' :
+                        svcDate?.urgency === 'red'   ? 'text-red-300' :
                         svcDate?.urgency === 'amber' ? 'text-amber-300' : 'text-emerald-300'
                       }`}>
-                        {formatDisplayDate(currentLead.service_pending_date)}
+                        {formatDisplayDate(effectiveSvcDate)}
                       </p>
                       {svcDate && (
                         <span className={`text-xs font-semibold px-2.5 py-1 rounded-full border ${
-                          svcDate.urgency === 'red' ? 'bg-red-500/15 border-red-500/30 text-red-300' :
+                          svcDate.urgency === 'red'   ? 'bg-red-500/15 border-red-500/30 text-red-300' :
                           svcDate.urgency === 'amber' ? 'bg-amber-500/15 border-amber-500/30 text-amber-300' :
                           'bg-emerald-500/15 border-emerald-500/30 text-emerald-300'
                         }`}>
@@ -664,10 +716,11 @@ export default function CallerWorkspace() {
                   <Phone className="w-4 h-4" /> Call
                 </a>
                 {currentLead.phone && (
-                  <a href={`https://wa.me/${currentLead.phone?.replace(/\D/g, '')}`} target="_blank" rel="noreferrer"
-                    className="flex-1 flex items-center justify-center gap-2 py-3 bg-slate-800/60 hover:bg-slate-700/60 border border-white/[0.08] text-slate-300 hover:text-white font-semibold text-sm rounded-xl transition-all">
+                  <button
+                    onClick={handleWhatsApp}
+                    className="flex-1 flex items-center justify-center gap-2 py-3 bg-[#25D366]/10 hover:bg-[#25D366]/20 border border-[#25D366]/30 text-[#25D366] hover:text-[#4AE07A] font-semibold text-sm rounded-xl transition-all">
                     <MessageCircle className="w-4 h-4" /> WhatsApp
-                  </a>
+                  </button>
                 )}
               </div>
             </div>

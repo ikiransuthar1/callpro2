@@ -12,15 +12,15 @@ import toast from 'react-hot-toast';
 
 /* ─── Field definitions ─────────────────────────────────────────────────── */
 const DB_FIELDS = [
-  { key: 'customer_name',       label: 'Customer Name' },
-  { key: 'phone',               label: 'Mobile / Phone' },
-  { key: 'vehicle_number',      label: 'Registration No.' },
-  { key: 'vehicle_model',       label: 'Model Name' },
-  { key: 'service_type',        label: 'Service Type (FREE 01 / FREE 02 / PAID)' },
-  { key: 'service_pending_date',label: 'Next Service Date' },
-  { key: 'insurance_expiry_date',label: 'Insurance Expiry Date' },
-  { key: 'address',             label: 'Address' },
-  { key: 'email',               label: 'Email' },
+  { key: 'customer_name',         label: 'Customer Name' },
+  { key: 'phone',                 label: 'Mobile / Phone' },
+  { key: 'vehicle_number',        label: 'Registration No.' },
+  { key: 'vehicle_model',         label: 'Model Name' },
+  { key: 'next_service_type',     label: 'Next Service Type (FREE 01 / FREE 02 / PAID)' },
+  { key: 'next_service_date',     label: 'Next Service Date' },
+  { key: 'insurance_expiry_date', label: 'Insurance Expiry Date' },
+  { key: 'address',               label: 'Address' },
+  { key: 'email',                 label: 'Email' },
 ] as const;
 
 type DbFieldKey = (typeof DB_FIELDS)[number]['key'];
@@ -28,15 +28,15 @@ type ColumnMapping = Partial<Record<DbFieldKey, string>>;
 
 /* ─── Auto-detect Honda service CSV columns ────────────────────────────── */
 const AUTO_DETECT_RULES: Array<{ field: DbFieldKey; keywords: string[] }> = [
-  { field: 'customer_name',        keywords: ['customer name', 'customername', 'name'] },
-  { field: 'phone',                keywords: ['mobile number', 'mobilenumber', 'mobile', 'phone', 'contact'] },
-  { field: 'vehicle_number',       keywords: ['registration no', 'registration no.', 'reg no', 'regno', 'vehicle number', 'vehiclenumber', 'reg.'] },
-  { field: 'vehicle_model',        keywords: ['model name', 'modelname', 'model', 'vehicle model'] },
-  { field: 'service_type',         keywords: ['next service type', 'nextservicetype', 'service type'] },
-  { field: 'service_pending_date', keywords: ['next service date', 'nextservicedate', 'service date', 'service pending'] },
-  { field: 'insurance_expiry_date',keywords: ['insurance expiry', 'insuranceexpiry', 'expiry date', 'insurance date'] },
-  { field: 'address',              keywords: ['address', 'city', 'location'] },
-  { field: 'email',                keywords: ['email', 'e-mail', 'mail'] },
+  { field: 'customer_name',         keywords: ['customer name', 'customername', 'name'] },
+  { field: 'phone',                 keywords: ['mobile number', 'mobilenumber', 'mobile', 'phone', 'contact'] },
+  { field: 'vehicle_number',        keywords: ['registration no', 'registration no.', 'reg no', 'regno', 'vehicle number', 'vehiclenumber', 'reg.'] },
+  { field: 'vehicle_model',         keywords: ['model name', 'modelname', 'model', 'vehicle model'] },
+  { field: 'next_service_type',     keywords: ['next service type', 'nextservicetype', 'service type'] },
+  { field: 'next_service_date',     keywords: ['next service date', 'nextservicedate', 'service date', 'service pending'] },
+  { field: 'insurance_expiry_date', keywords: ['insurance expiry', 'insuranceexpiry', 'expiry date', 'insurance date'] },
+  { field: 'address',               keywords: ['address', 'city', 'location'] },
+  { field: 'email',                 keywords: ['email', 'e-mail', 'mail'] },
 ];
 
 function autoDetectMapping(columns: string[]): ColumnMapping {
@@ -53,26 +53,57 @@ function autoDetectMapping(columns: string[]): ColumnMapping {
   return mapping;
 }
 
-/* ─── Date parsing: DD/MM/YYYY → YYYY-MM-DD ────────────────────────────── */
-function parseDate(raw: string | null | undefined): string | null {
+/* ─── Date parsing: any Excel/CSV date → YYYY-MM-DD ───────────────────── */
+// With cellDates:true, XLSX returns JS Date objects for date cells.
+// With cellDates:false (legacy), dates may be strings in various formats.
+function parseDate(raw: string | Date | null | undefined): string | null {
   if (!raw) return null;
+
+  // JS Date object (from XLSX with cellDates: true)
+  if (raw instanceof Date) {
+    if (isNaN(raw.getTime())) return null;
+    const y = raw.getFullYear();
+    const m = String(raw.getMonth() + 1).padStart(2, '0');
+    const d = String(raw.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  }
+
   const str = String(raw).trim();
-  // Already YYYY-MM-DD
-  if (/^\d{4}-\d{2}-\d{2}$/.test(str)) return str;
-  // DD/MM/YYYY
-  const m = str.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
-  if (m) return `${m[3]}-${m[2].padStart(2,'0')}-${m[1].padStart(2,'0')}`;
-  // Excel serial numbers (from XLSX raw: false should handle, but fallback)
-  if (/^\d{5}$/.test(str)) {
+  if (!str) return null;
+
+  // Already YYYY-MM-DD or ISO datetime
+  if (/^\d{4}-\d{2}-\d{2}/.test(str)) return str.slice(0, 10);
+
+  // DD/MM/YYYY — the Honda CSV/XLSX format (day-first)
+  const ddmm = str.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (ddmm) {
+    const day = ddmm[1].padStart(2, '0');
+    const mon = ddmm[2].padStart(2, '0');
+    return `${ddmm[3]}-${mon}-${day}`;
+  }
+
+  // Excel serial number (days since 1899-12-30)
+  if (/^\d{4,6}(\.\d+)?$/.test(str)) {
+    const serial = Math.floor(parseFloat(str));
+    if (serial > 1 && serial < 100000) {
+      const epoch = new Date(Date.UTC(1899, 11, 30));
+      const date  = new Date(epoch.getTime() + serial * 86400000);
+      const y = date.getUTCFullYear();
+      const m = String(date.getUTCMonth() + 1).padStart(2, '0');
+      const d = String(date.getUTCDate()).padStart(2, '0');
+      return `${y}-${m}-${d}`;
+    }
+    // Fallback: try XLSX serial parser
     const d = XLSX.SSF.parse_date_code(Number(str));
     if (d) return `${d.y}-${String(d.m).padStart(2,'0')}-${String(d.d).padStart(2,'0')}`;
   }
+
   return null;
 }
 
 interface ParsedData {
   columns: string[];
-  rows: Record<string, string>[];
+  rows: Record<string, string | Date>[];
   fileName: string;
 }
 
@@ -128,15 +159,17 @@ export default function LeadFiles() {
         const buffer = e.target?.result as ArrayBuffer;
         const data = new Uint8Array(buffer);
         // XLSX.read handles UTF-16 BOM, tab-separated, and Excel formats
-        const workbook = XLSX.read(data, { type: 'array', raw: false, cellDates: false });
+        // cellDates: true → Excel date cells become JS Date objects (most reliable)
+        // raw: false      → non-date cells formatted as strings
+        const workbook = XLSX.read(data, { type: 'array', raw: false, cellDates: true });
         const sheet = workbook.Sheets[workbook.SheetNames[0]];
-        const jsonRows = XLSX.utils.sheet_to_json<Record<string, string>>(sheet, {
+        const jsonRows = XLSX.utils.sheet_to_json<Record<string, string | Date>>(sheet, {
           raw: false,
           defval: '',
         });
         if (jsonRows.length === 0) { toast.error('File is empty'); return; }
         const columns = Object.keys(jsonRows[0]);
-        const rows = jsonRows as Record<string, string>[];
+        const rows = jsonRows as Record<string, string | Date>[];
         const detected = autoDetectMapping(columns);
         setParsedData({ columns, rows, fileName: file.name });
         setMapping(detected);
@@ -215,13 +248,17 @@ export default function LeadFiles() {
           return {
             dealer_id: dealerId,
             file_id: fileId,
-            customer_name:        mapping.customer_name        ? (row[mapping.customer_name] || null) : null,
-            phone:                mapping.phone                ? (row[mapping.phone] || null) : null,
-            vehicle_number:       mapping.vehicle_number       ? (row[mapping.vehicle_number] || null) : null,
-            vehicle_model:        mapping.vehicle_model        ? (row[mapping.vehicle_model] || null) : null,
-            service_type:         mapping.service_type         ? (row[mapping.service_type] || null) : null,
-            service_pending_date: parseDate(mapping.service_pending_date ? row[mapping.service_pending_date] : null),
-            insurance_expiry_date:parseDate(mapping.insurance_expiry_date ? row[mapping.insurance_expiry_date] : null),
+            customer_name:        mapping.customer_name        ? (String(row[mapping.customer_name] ?? '') || null) : null,
+            phone:                mapping.phone                ? (String(row[mapping.phone] ?? '') || null) : null,
+            vehicle_number:       mapping.vehicle_number       ? (String(row[mapping.vehicle_number] ?? '') || null) : null,
+            vehicle_model:         mapping.vehicle_model         ? (String(row[mapping.vehicle_model] ?? '') || null) : null,
+            // next_service_type is the canonical column; also mirror to legacy service_type
+            next_service_type:     mapping.next_service_type     ? (String(row[mapping.next_service_type] ?? '') || null) : null,
+            service_type:          mapping.next_service_type     ? (String(row[mapping.next_service_type] ?? '') || null) : null,
+            // next_service_date is the canonical column; also mirror to legacy service_pending_date
+            next_service_date:     parseDate(mapping.next_service_date     ? row[mapping.next_service_date]     : null),
+            service_pending_date:  parseDate(mapping.next_service_date     ? row[mapping.next_service_date]     : null),
+            insurance_expiry_date: parseDate(mapping.insurance_expiry_date ? row[mapping.insurance_expiry_date] : null),
             address:              mapping.address              ? (row[mapping.address] || null) : null,
             email:                mapping.email                ? (row[mapping.email] || null) : null,
             extra_data:           Object.keys(extra).length > 0 ? extra : null,

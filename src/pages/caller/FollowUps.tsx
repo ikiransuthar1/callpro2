@@ -191,6 +191,28 @@ function FollowUpCard({
               {new Date(entry.called_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
             </p>
           </div>
+
+          {/* Next Service Date */}
+          {(lead.next_service_date || lead.service_pending_date) && (
+            <div className="col-span-2 bg-amber-500/[0.08] border border-amber-500/20 rounded-xl px-3 py-2">
+              <p className="text-[10px] text-amber-500/70 uppercase tracking-wider font-medium flex items-center gap-1.5">
+                <Calendar className="w-3 h-3" /> Next Service
+                {(lead.next_service_type || lead.service_type) && (
+                  <span className="ml-auto px-2 py-0.5 bg-amber-500/15 border border-amber-500/25 rounded-full text-[10px] font-bold text-amber-400">
+                    {lead.next_service_type ?? lead.service_type}
+                  </span>
+                )}
+              </p>
+              <p className="text-sm font-bold text-amber-300 mt-1">
+                {(() => {
+                  const raw = lead.next_service_date ?? lead.service_pending_date;
+                  if (!raw) return '—';
+                  const [y, m, d] = raw.split('-');
+                  return `${d}-${m}-${y}`;
+                })()}
+              </p>
+            </div>
+          )}
         </div>
 
         {/* Notes */}
