@@ -1,812 +1,446 @@
-// Updated on 11 July
-import { useState, useEffect, useCallback, useRef } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
-import {
-  Phone, Car, Calendar, Clock, CheckCircle, XCircle, PhoneOff,
-  PhoneMissed, PhoneCall, ChevronDown, ChevronUp, Zap, Target,
-  TrendingUp, Filter, Save, AlertTriangle, SkipForward, Inbox,
-  MessageCircle, Gauge, Wrench, MapPin, Mail, Building2, FileSpreadsheet, X,
-} from 'lucide-react';
-import toast from 'react-hot-toast';
-import { supabase } from '../../lib/supabase';
-import { useAuth } from '../../contexts/AuthContext';
-import type { Lead, CallAction, LeadFile } from '../../types/database';
+import { useState, useEffect, useCallback, useRef } from 'react'
+import { Phone, PhoneOff, PhoneCall, Calendar, Save, Filter, X } from 'lucide-react'
+import { supabase, Lead } from '../../lib/supabase'
+import { useAuth } from '../../contexts/AuthContext'
 
-/* ─── Types ──────────────────────────────────────────────────────────────── */
-interface Filters {
-  serviceType: string;
-  serviceDate: string; // exact date picker YYYY-MM-DD or ''
-  fileId: string;      // selected lead_file id or ''
+const OUTCOMES = [
+  'Answered - Interested',
+  'Answered - Not Interested',
+  'No Answer',
+  'Busy',
+  'Callback Scheduled',
+  'Wrong Number',
+  'Completed',
+]
+
+function fmtDate(d: string | null) {
+  if (!d) return null
+  try {
+    return new Date(d + 'T00:00:00').toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })
+  } catch {
+    return d
+  }
 }
 
-/* ─── Helpers ─────────────────────────────────────────────────────────────── */
-function formatDisplayDate(dateStr: string | null) {
-  if (!dateStr) return null;
-  const [y, m, d] = dateStr.split('-');
-  return `${d}/${m}/${y}`;
+// Robust blank check: null, undefined, empty string, whitespace-only, "null"/"undefined" strings
+function hasValue(v: unknown): boolean {
+  if (v === null || v === undefined) return false
+  const s = String(v).trim()
+  if (s === '' || s === '-' || s.toLowerCase() === 'null' || s.toLowerCase() === 'undefined' || s.toLowerCase() === 'na' || s.toLowerCase() === 'n/a') return false
+  return true
 }
 
-function formatRelativeDate(dateStr: string | null): { label: string; urgency: 'red' | 'amber' | 'green' | 'muted' } {
-  if (!dateStr) return { label: '—', urgency: 'muted' };
-  const today = new Date(); today.setHours(0, 0, 0, 0);
-  const date = new Date(dateStr); date.setHours(0, 0, 0, 0);
-  const diff = Math.round((date.getTime() - today.getTime()) / 86400000);
-  if (diff < 0)  return { label: `${Math.abs(diff)}d overdue`, urgency: 'red' };
-  if (diff === 0) return { label: 'Due today', urgency: 'red' };
-  if (diff === 1) return { label: 'Tomorrow', urgency: 'amber' };
-  if (diff <= 7)  return { label: `In ${diff} days`, urgency: 'amber' };
-  return { label: `In ${diff} days`, urgency: 'green' };
-}
-
-function svcBadgeStyle(type: string | null) {
-  const t = type?.toUpperCase() ?? '';
-  if (t === 'FREE 01') return { bg: 'bg-emerald-500/15 border-emerald-500/30 text-emerald-400', dot: 'bg-emerald-400', header: 'text-emerald-400' };
-  if (t === 'FREE 02') return { bg: 'bg-blue-500/15 border-blue-500/30 text-blue-400', dot: 'bg-blue-400', header: 'text-blue-400' };
-  if (t === 'FREE 03') return { bg: 'bg-cyan-500/15 border-cyan-500/30 text-cyan-400', dot: 'bg-cyan-400', header: 'text-cyan-400' };
-  if (t === 'PAID')    return { bg: 'bg-amber-500/15 border-amber-500/30 text-amber-400', dot: 'bg-amber-400', header: 'text-amber-400' };
-  return { bg: 'bg-slate-500/15 border-slate-500/30 text-slate-400', dot: 'bg-slate-400', header: 'text-slate-400' };
-}
-
-const urgencyColor: Record<string, string> = {
-  red:   'text-red-400',
-  amber: 'text-amber-400',
-  green: 'text-emerald-400',
-  muted: 'text-slate-500',
-};
-
-const ACTION_OPTIONS: { value: CallAction; label: string; icon: React.ElementType; color: string }[] = [
-  { value: 'interested',     label: 'Interested',     icon: CheckCircle,  color: 'text-emerald-400' },
-  { value: 'not_interested', label: 'Not Interested', icon: XCircle,      color: 'text-red-400' },
-  { value: 'call_later',     label: 'Call Later',     icon: Clock,        color: 'text-amber-400' },
-  { value: 'no_answer',      label: 'No Answer',      icon: PhoneMissed,  color: 'text-slate-400' },
-  { value: 'busy',           label: 'Busy',           icon: PhoneOff,     color: 'text-orange-400' },
-  { value: 'wrong_number',   label: 'Wrong Number',   icon: PhoneOff,     color: 'text-rose-400' },
-  { value: 'completed',      label: 'Completed',      icon: CheckCircle,  color: 'text-cyan-400' },
-];
-const NOTES_REQUIRED: CallAction[] = ['interested', 'not_interested', 'wrong_number'];
-
-function StatPill({ icon: Icon, label, value, accent }: { icon: React.ElementType; label: string; value: number; accent: string }) {
+// Field component: only renders if value is present and non-blank
+function Field({ label, value }: { label: string; value: string | null | undefined }) {
+  if (!hasValue(value)) return null
   return (
-    <div className="flex items-center gap-2 px-3 py-1.5 bg-slate-900/80 border border-white/[0.08] rounded-full">
-      <Icon className={`w-3.5 h-3.5 ${accent}`} />
-      <span className="text-xs text-slate-400">{label}</span>
-      <span className={`text-xs font-bold ${accent}`}>{value}</span>
+    <div>
+      <p className="text-[11px] font-semibold text-gray-400 uppercase tracking-wide">{label}</p>
+      <p className="text-sm text-gray-900 mt-0.5 break-words">{String(value).trim()}</p>
     </div>
-  );
+  )
 }
 
-const LOCK_TIMEOUT_MS = 2 * 60 * 1000; // 2 minutes
-const HEARTBEAT_INTERVAL_MS = 30 * 1000; // 30 seconds
+type WorkspaceState = 'loading' | 'has_lead' | 'no_leads_for_date' | 'all_done'
 
-/* ─── Main Component ─────────────────────────────────────────────────────── */
 export default function CallerWorkspace() {
-  const { profile } = useAuth();
+  const { profile } = useAuth()
 
-  const [currentLead, setCurrentLead] = useState<Lead | null>(null);
-  const [totalPending, setTotalPending] = useState(0);
-  const [callsToday, setCallsToday] = useState(0);
-  const [interestedToday, setInterestedToday] = useState(0);
-  const [selectedAction, setSelectedAction] = useState<CallAction | ''>('');
-  const [notes, setNotes] = useState('');
-  const [followUpDate, setFollowUpDate] = useState('');
-  const [filters, setFilters] = useState<Filters>({ serviceType: 'ALL', serviceDate: '', fileId: '' });
-  const [filtersOpen, setFiltersOpen] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [loading, setLoading] = useState(true);
-  const [dealerName, setDealerName] = useState<string | null>(null);
+  const [filterDate, setFilterDate] = useState<string>('')
+  const [showDatePicker, setShowDatePicker] = useState(false)
 
-  // Lead files list (read-only)
-  const [leadFiles, setLeadFiles] = useState<LeadFile[]>([]);
+  const [wsState, setWsState] = useState<WorkspaceState>('loading')
+  const [lead, setLead] = useState<Lead | null>(null)
+  const [remainingCount, setRemainingCount] = useState(0)
 
-  // Lead locking refs
-  const currentLeadRef = useRef<Lead | null>(null);
-  const heartbeatTimer = useRef<ReturnType<typeof setInterval> | null>(null);
-  const notesRef = useRef<HTMLTextAreaElement>(null);
+  const [outcome, setOutcome] = useState('')
+  const [notes, setNotes] = useState('')
+  const [callback, setCallback] = useState('')
+  const [saving, setSaving] = useState(false)
 
-  // Keep ref in sync for cleanup
-  useEffect(() => { currentLeadRef.current = currentLead; }, [currentLead]);
+  const lockedLeadId = useRef<string | null>(null)
 
-  /* ─── Fetch dealer name for WhatsApp message ────────────────────────── */
-  useEffect(() => {
-    if (!profile?.dealer_id) return;
-    supabase
-      .from('dealers')
-      .select('company_name')
-      .eq('id', profile.dealer_id)
-      .maybeSingle()
-      .then(({ data }) => {
-        if (data?.company_name) setDealerName(data.company_name);
-      });
-  }, [profile?.dealer_id]);
+  const fetchNextLead = useCallback(async (releasedId?: string) => {
+    if (!profile?.dealer_id || !profile?.id) return
 
-  /* ─── Fetch lead files (read-only dropdown) ──────────────────────────── */
-  const fetchLeadFiles = useCallback(async () => {
-    if (!profile?.dealer_id) return;
-    const { data } = await supabase
-      .from('lead_files')
-      .select('id, file_name, original_name, total_records, created_at')
-      .eq('dealer_id', profile.dealer_id)
-      .order('created_at', { ascending: false });
-    if (data) setLeadFiles(data as LeadFile[]);
-  }, [profile?.dealer_id]);
+    setWsState('loading')
+    setOutcome('')
+    setNotes('')
+    setCallback('')
 
-  useEffect(() => { fetchLeadFiles(); }, [fetchLeadFiles]);
-
-  /* ─── Fetch today stats ──────────────────────────────────────────────── */
-  const fetchTodayStats = useCallback(async () => {
-    if (!profile?.id) return;
-    const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
-    const { data } = await supabase
-      .from('call_logs').select('action')
-      .eq('caller_id', profile.id)
-      .gte('called_at', todayStart.toISOString());
-    if (data) {
-      setCallsToday(data.length);
-      setInterestedToday(data.filter((l: { action: string }) => l.action === 'interested').length);
-    }
-  }, [profile?.id]);
-
-  /* ─── Lock management ────────────────────────────────────────────────── */
-  const startHeartbeat = useCallback((leadId: string) => {
-    if (heartbeatTimer.current) clearInterval(heartbeatTimer.current);
-    heartbeatTimer.current = setInterval(async () => {
-      if (!profile?.id) return;
-      const { error } = await supabase
+    if (releasedId) {
+      await supabase
         .from('leads')
-        .update({ locked_at: new Date().toISOString() })
-        .eq('id', leadId)
-        .eq('locked_by', profile.id);
-      if (error) {
-        // Lock might have been released by stale-locks sweeper; stop heartbeat
-        if (heartbeatTimer.current) clearInterval(heartbeatTimer.current);
-      }
-    }, HEARTBEAT_INTERVAL_MS);
-  }, [profile?.id]);
-
-  const stopHeartbeat = useCallback(() => {
-    if (heartbeatTimer.current) {
-      clearInterval(heartbeatTimer.current);
-      heartbeatTimer.current = null;
+        .update({ locked_by: null, locked_at: null })
+        .eq('id', releasedId)
+        .eq('locked_by', profile.id)
+      lockedLeadId.current = null
     }
-  }, []);
 
-  const releaseLock = useCallback(async (leadId: string) => {
-    if (!profile?.id) return;
-    stopHeartbeat();
-    await supabase.rpc('unlock_lead', { p_lead_id: leadId, p_caller_id: profile.id });
-  }, [profile?.id, stopHeartbeat]);
+    let query = supabase
+      .from('leads')
+      .select('*')
+      .eq('dealer_id', profile.dealer_id)
+      .eq('status', 'pending')
+      .is('locked_by', null)
 
-  /* ─── Claim next lead (atomic via SECURITY DEFINER function) ─────────── */
-  const fetchNextLead = useCallback(async () => {
-    if (!profile?.dealer_id || !profile?.id) return;
-    setLoading(true);
-    try {
-      // Release any previous lock before claiming a new one
-      if (currentLeadRef.current) {
-        await releaseLock(currentLeadRef.current.id);
-      }
-
-      // Convert date filter to YYYY-MM-DD for exact match
-      const serviceDate = filters.serviceDate || null;
-
-      const { data, error } = await supabase.rpc('claim_next_lead', {
-        p_dealer_id: profile.dealer_id,
-        p_caller_id: profile.id,
-        p_service_type: filters.serviceType === 'ALL' ? null : filters.serviceType,
-        p_file_id: filters.fileId || null,
-        p_service_date: serviceDate,
-      });
-
-      if (error) throw error;
-
-      const lead = data as unknown as Lead | null;
-      setCurrentLead(lead ?? null);
-      if (lead) {
-        startHeartbeat(lead.id);
-      } else {
-        stopHeartbeat();
-      }
-
-      // Get pending count via RPC — checks both service_pending_date AND extra_data->>'Next Service Date'
-      const { data: countResult, error: countErr } = await supabase.rpc('count_available_leads', {
-        p_dealer_id: profile.dealer_id,
-        p_service_type: filters.serviceType === 'ALL' ? null : filters.serviceType,
-        p_file_id: filters.fileId || null,
-        p_service_date: filters.serviceDate || null,
-      });
-      if (countErr) {
-        setTotalPending(0);
-      } else {
-        setTotalPending((countResult as number) ?? 0);
-      }
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Failed to load lead');
-    } finally {
-      setLoading(false);
+    if (filterDate) {
+      query = query.eq('next_service_date', filterDate)
     }
-  }, [profile?.dealer_id, profile?.id, filters, releaseLock, startHeartbeat, stopHeartbeat]);
+
+    const { data } = await query
+      .order('sort_order', { ascending: true })
+      .limit(1)
+      .maybeSingle()
+
+    if (data) {
+      await supabase
+        .from('leads')
+        .update({ locked_by: profile.id, locked_at: new Date().toISOString() })
+        .eq('id', data.id)
+
+      lockedLeadId.current = data.id
+      setLead(data as Lead)
+
+      let countQ = supabase
+        .from('leads')
+        .select('id', { count: 'exact', head: true })
+        .eq('dealer_id', profile.dealer_id)
+        .eq('status', 'pending')
+        .is('locked_by', null)
+      if (filterDate) countQ = countQ.eq('next_service_date', filterDate)
+      const { count } = await countQ
+      setRemainingCount(count ?? 0)
+      setWsState('has_lead')
+    } else {
+      setLead(null)
+      lockedLeadId.current = null
+      setRemainingCount(0)
+      setWsState(filterDate ? 'no_leads_for_date' : 'all_done')
+    }
+  }, [profile?.dealer_id, profile?.id, filterDate])
 
   useEffect(() => {
-    fetchNextLead();
-    fetchTodayStats();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filters]);
+    fetchNextLead()
+  }, [filterDate])
 
-  /* ─── Release lock on unmount / tab close ────────────────────────────── */
   useEffect(() => {
-    const handleUnload = () => {
-      // Synchronous best-effort release via sendBeacon
-      const lead = currentLeadRef.current;
-      if (!lead || !profile?.id) return;
-      const body = JSON.stringify({ p_lead_id: lead.id, p_caller_id: profile.id });
-      const url = `${import.meta.env.VITE_SUPABASE_URL}/rest/v1/rpc/unlock_lead`;
-      try {
-        navigator.sendBeacon(url, new Blob([body], { type: 'application/json' }));
-      } catch { /* best-effort */ }
-    };
-    window.addEventListener('beforeunload', handleUnload);
     return () => {
-      window.removeEventListener('beforeunload', handleUnload);
-      // Also release on component unmount (SPA navigation)
-      if (currentLeadRef.current && profile?.id) {
-        releaseLock(currentLeadRef.current.id);
+      if (lockedLeadId.current && profile?.id) {
+        supabase
+          .from('leads')
+          .update({ locked_by: null, locked_at: null })
+          .eq('id', lockedLeadId.current)
+          .eq('locked_by', profile.id)
       }
-      stopHeartbeat();
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [profile?.id]);
-
-  /* ─── Keyboard shortcut ──────────────────────────────────────────────── */
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      if (e.key === 's' && !e.ctrlKey && !e.metaKey) {
-        const tag = (document.activeElement as HTMLElement)?.tagName;
-        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
-        handleSave();
-      }
-    };
-    window.addEventListener('keydown', handler);
-    return () => window.removeEventListener('keydown', handler);
-  }, [selectedAction, notes, followUpDate, currentLead]); // eslint-disable-line
-
-  /* ─── Save action ────────────────────────────────────────────────────── */
-  const handleSave = async () => {
-    if (!currentLead || !selectedAction || !profile) return;
-    if (selectedAction === 'call_later' && !followUpDate) { toast.error('Pick a follow-up date'); return; }
-    if (NOTES_REQUIRED.includes(selectedAction) && !notes.trim()) {
-      toast.error('Notes are required for this action');
-      notesRef.current?.focus();
-      return;
     }
-    setSaving(true);
-    try {
-      const { error: logErr } = await supabase.from('call_logs').insert({
-        dealer_id: currentLead.dealer_id,
-        lead_id: currentLead.id,
-        caller_id: profile.id,
-        action: selectedAction,
-        excuse_notes: notes.trim() || null,
-        follow_up_date: selectedAction === 'call_later' ? followUpDate : null,
-      } as never);
-      if (logErr) throw logErr;
+  }, [profile?.id])
 
-      const newStatus =
-        selectedAction === 'not_interested' ? 'not_interested' :
-        selectedAction === 'call_later'     ? 'follow_up' :
-        selectedAction === 'completed'      ? 'completed' : 'called';
+  async function submitCall() {
+    if (!lead || !outcome || !profile?.id || !profile?.dealer_id) return
+    setSaving(true)
 
-      // Update status AND release the lock in one operation
-      const { error: leadErr } = await supabase.from('leads')
-        .update({ status: newStatus, locked_by: null, locked_at: null } as never)
-        .eq('id', currentLead.id);
-      if (leadErr) throw leadErr;
+    await supabase.from('call_logs').insert({
+      lead_id: lead.id,
+      caller_id: profile.id,
+      dealer_id: profile.dealer_id,
+      action: outcome,
+      excuse_notes: notes || null,
+      follow_up_date: callback ? callback.split('T')[0] : null,
+    })
 
-      stopHeartbeat();
-      toast.success('Saved! Loading next…', { duration: 1500 });
-      setSelectedAction(''); setNotes(''); setFollowUpDate('');
-      await fetchTodayStats();
-      await fetchNextLead();
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Save failed');
-    } finally { setSaving(false); }
-  };
+    const newStatus =
+      outcome.toLowerCase().includes('completed') ? 'completed' :
+      outcome.toLowerCase().includes('not interested') ? 'not_interested' :
+      outcome.toLowerCase().includes('callback') ? 'callback' : 'called'
 
-  /* ─── Skip lead (release lock, get next) ─────────────────────────────── */
-  const handleSkip = async () => {
-    if (!currentLead) return;
-    await releaseLock(currentLead.id);
-    toast('Lead skipped — released to queue', { icon: '↩', duration: 1500 });
-    await fetchNextLead();
-  };
+    await supabase
+      .from('leads')
+      .update({ status: newStatus, locked_by: null, locked_at: null })
+      .eq('id', lead.id)
 
-  /* ─── WhatsApp pre-filled message ───────────────────────────────────── */
-  const handleWhatsApp = () => {
-    if (!currentLead) return;
+    lockedLeadId.current = null
+    setSaving(false)
+    fetchNextLead(lead.id)
+  }
 
-    // Prefer new canonical columns; fall back to legacy ones
-    const custName    = currentLead.customer_name   ?? 'Customer';
-    const model       = currentLead.vehicle_model   ?? 'Vehicle';
-    const svcType     = currentLead.next_service_type ?? currentLead.service_type ?? 'Service';
-    const rawDate     = currentLead.next_service_date ?? currentLead.service_pending_date;
-    const dealer      = dealerName ?? 'Showroom';
+  const filterBar = (
+    <div className="bg-white border-b border-gray-200 px-4 py-2 flex items-center gap-2 flex-wrap sticky top-0 z-10">
+      <button
+        onClick={() => setShowDatePicker((s) => !s)}
+        className={`flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-lg border transition-colors ${
+          filterDate
+            ? 'border-blue-500 bg-blue-50 text-blue-700 font-medium'
+            : 'border-gray-300 text-gray-600 hover:border-gray-400'
+        }`}
+      >
+        <Filter size={14} />
+        {filterDate ? `Next Service: ${fmtDate(filterDate)}` : 'Filter by Next Service Date'}
+      </button>
 
-    // Format date as DD-MM-YYYY for the message
-    let formattedDate = 'N/A';
-    if (rawDate) {
-      const [y, m, d] = rawDate.split('-');
-      formattedDate = `${d}-${m}-${y}`;
-    }
+      {filterDate && (
+        <button
+          onClick={() => { setFilterDate(''); setShowDatePicker(false) }}
+          className="p-1 text-gray-400 hover:text-gray-600 rounded"
+          title="Clear filter"
+        >
+          <X size={15} />
+        </button>
+      )}
 
-    const message =
-      `Hello Dear, ${custName} Apki HONDA ${model} Ki ${svcType} Service ${formattedDate} ko Schedule he ` +
-      `Toh Kripya Samay se Pahle Showroom par ake Apni Service Karvaye. ${dealer}`;
+      {showDatePicker && (
+        <input
+          type="date"
+          value={filterDate}
+          autoFocus
+          onChange={(e) => { setFilterDate(e.target.value); setShowDatePicker(false) }}
+          onBlur={() => setShowDatePicker(false)}
+          className="border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+        />
+      )}
 
-    // Strip non-digit chars; prepend India country code for 10-digit numbers
-    let phone = (currentLead.phone ?? '').replace(/\D/g, '');
-    if (phone.length === 10) phone = '91' + phone;
+      {filterDate && wsState === 'has_lead' && (
+        <span className="ml-auto text-xs text-gray-500">
+          {remainingCount} lead{remainingCount !== 1 ? 's' : ''} remaining
+        </span>
+      )}
+    </div>
+  )
 
-    const url = `https://wa.me/${phone}?text=${encodeURIComponent(message)}`;
-    window.open(url, '_blank', 'noopener,noreferrer');
-  };
+  if (wsState === 'loading') {
+    return (
+      <div className="min-h-[calc(100vh-56px)] flex flex-col">
+        {filterBar}
+        <div className="flex-1 flex items-center justify-center">
+          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600" />
+        </div>
+      </div>
+    )
+  }
 
-  /* ─── Derived values ─────────────────────────────────────────────────── */
-  // Prefer new canonical columns; fall back to legacy for old data
-  const extra = (currentLead?.extra_data ?? {}) as Record<string, string>;
-  const badge = currentLead ? svcBadgeStyle(currentLead.next_service_type ?? currentLead.service_type) : null;
-  const effectiveSvcDate = currentLead?.next_service_date ?? currentLead?.service_pending_date ?? null;
-  const effectiveSvcType = currentLead?.next_service_type ?? currentLead?.service_type ?? null;
-  const svcDate  = effectiveSvcDate ? formatRelativeDate(effectiveSvcDate) : null;
-  const insDate  = currentLead ? formatRelativeDate(currentLead.insurance_expiry_date) : null;
-  const selectedMeta = ACTION_OPTIONS.find(a => a.value === selectedAction);
-  const todayStr = new Date().toISOString().split('T')[0];
+  if (wsState === 'no_leads_for_date') {
+    return (
+      <div className="min-h-[calc(100vh-56px)] flex flex-col">
+        {filterBar}
+        <div className="flex-1 flex items-center justify-center bg-gray-50 py-16">
+          <div className="text-center p-8 max-w-sm">
+            <div className="w-16 h-16 bg-gray-100 rounded-full flex items-center justify-center mx-auto mb-4">
+              <Calendar size={28} className="text-gray-400" />
+            </div>
+            <h2 className="text-lg font-semibold text-gray-800">No leads for this date</h2>
+            <p className="text-gray-500 text-sm mt-2">
+              There are no pending leads with a next service date of{' '}
+              <span className="font-medium text-gray-700">{fmtDate(filterDate)}</span>.
+            </p>
+            <p className="text-gray-400 text-xs mt-1">Try selecting a different date.</p>
+            <div className="flex gap-2 justify-center mt-6">
+              <button
+                onClick={() => { setFilterDate('') }}
+                className="px-4 py-2 border border-gray-300 text-gray-700 rounded-lg text-sm hover:bg-gray-50 transition-colors"
+              >
+                Clear Filter
+              </button>
+              <button
+                onClick={() => setShowDatePicker(true)}
+                className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors"
+              >
+                Pick Another Date
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    )
+  }
 
-  const lastSvcDate = extra['Last Service Date'] || null;
-  const lastSvcKms  = extra['Last Service Kms'] || null;
-  const lastSvcType = extra['Last Service Type'] || null;
-  const vehicleType = extra['Vehicle Type'] || null;
-  const sellerName  = extra['Selling Dealer Name'] || null;
+  if (wsState === 'all_done') {
+    return (
+      <div className="min-h-[calc(100vh-56px)] flex flex-col">
+        {filterBar}
+        <div className="flex-1 flex items-center justify-center bg-gray-50 py-16">
+          <div className="text-center p-8">
+            <div className="w-16 h-16 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-4">
+              <PhoneOff size={28} className="text-green-500" />
+            </div>
+            <h2 className="text-xl font-semibold text-gray-700">All caught up!</h2>
+            <p className="text-gray-500 mt-1 text-sm">All pending leads have been processed.</p>
+            <button
+              onClick={() => fetchNextLead()}
+              className="mt-5 px-5 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700"
+            >
+              Refresh
+            </button>
+          </div>
+        </div>
+      </div>
+    )
+  }
 
-  const knownExtraKeys = new Set(['Last Service Date', 'Last Service Kms', 'Last Service Type', 'Vehicle Type', 'Selling Dealer Name']);
-  const otherExtras = Object.entries(extra).filter(([k]) => !knownExtraKeys.has(k) && k && extra[k]);
+  if (!lead) return null
 
-  const hasActiveFilters = filters.serviceType !== 'ALL' || filters.serviceDate !== '' || filters.fileId !== '';
+  // Filter extra_data: only show entries that have actual values
+  const extraEntries = Object.entries(lead.extra_data ?? {}).filter(([, v]) => hasValue(v))
+
+  // Check each section for visibility — only show sections that have at least one non-blank field
+  const hasVehicleInfo = hasValue(lead.vehicle_number) || hasValue(lead.vehicle_model)
+  const hasServiceInfo = hasValue(lead.next_service_date) || hasValue(lead.next_service_type) || hasValue(lead.service_pending_date) || hasValue(lead.service_type)
+  const hasInsurance = hasValue(lead.insurance_expiry_date)
+  const hasContactInfo = hasValue(lead.address) || hasValue(lead.email)
+  const hasExtra = extraEntries.length > 0
 
   return (
-    <div className="min-h-screen bg-[#080C14] p-6 lg:p-8">
+    <div className="min-h-[calc(100vh-56px)] bg-gray-50 flex flex-col">
+      {filterBar}
 
-      {/* ── Top bar ──────────────────────────────────────────────────────── */}
-      <div className="flex flex-wrap items-center justify-between gap-4 mb-5">
-        <div>
-          <h1 className="text-xl font-bold text-white flex items-center gap-2">
-            <PhoneCall className="w-5 h-5 text-cyan-400" />
-            Caller Workspace
-          </h1>
-          <p className="text-xs text-slate-500 mt-0.5">One lead at a time · sequential queue</p>
-        </div>
-        <div className="flex items-center gap-2 flex-wrap">
-          <StatPill icon={PhoneCall} label="Calls today"  value={callsToday}       accent="text-cyan-400" />
-          <StatPill icon={Target}    label="Interested"   value={interestedToday}   accent="text-emerald-400" />
-          <StatPill icon={Inbox}     label="In queue"     value={totalPending}      accent="text-amber-400" />
-        </div>
-      </div>
+      <div className="py-4 px-3 flex-1">
+        <div className="max-w-xl mx-auto space-y-3">
 
-      {/* ── Filters ──────────────────────────────────────────────────────── */}
-      <div className="bg-slate-900/80 backdrop-blur border border-white/[0.08] rounded-2xl mb-6 overflow-hidden">
-        <button onClick={() => setFiltersOpen(v => !v)}
-          className="w-full flex items-center justify-between px-5 py-3.5 text-sm font-medium text-slate-300 hover:text-white transition-colors">
-          <span className="flex items-center gap-2">
-            <Filter className="w-4 h-4 text-cyan-400" />
-            Filters
-            {hasActiveFilters && (
-              <span className="text-[10px] px-1.5 py-0.5 bg-cyan-500/20 text-cyan-400 border border-cyan-500/30 rounded-full font-bold">ACTIVE</span>
-            )}
-          </span>
-          <div className="flex items-center gap-2">
-            {hasActiveFilters && (
-              <button
-                onClick={(e) => { e.stopPropagation(); setFilters({ serviceType: 'ALL', serviceDate: '', fileId: '' }); }}
-                className="text-xs text-slate-500 hover:text-red-400 transition-colors"
-              >
-                Clear all
-              </button>
-            )}
-            {filtersOpen ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
-          </div>
-        </button>
-
-        <AnimatePresence>
-          {filtersOpen && (
-            <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: 'auto', opacity: 1 }}
-              exit={{ height: 0, opacity: 0 }} transition={{ duration: 0.2 }} className="overflow-hidden">
-              <div className="px-5 pb-5 pt-1 border-t border-white/[0.06] grid grid-cols-1 sm:grid-cols-3 gap-4">
-
-                {/* Service type */}
-                <div>
-                  <label className="text-[10px] text-slate-500 uppercase tracking-wider font-medium block mb-1.5">Service Type</label>
-                  <div className="flex flex-wrap gap-1.5">
-                    {(['ALL', 'FREE 01', 'FREE 02', 'FREE 03', 'PAID'] as const).map(t => {
-                      const active = filters.serviceType === t;
-                      const s = svcBadgeStyle(t === 'ALL' ? null : t);
-                      return (
-                        <button key={t} onClick={() => setFilters(f => ({ ...f, serviceType: t }))}
-                          className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition-all ${
-                            active ? (t === 'ALL' ? 'bg-cyan-500/20 border-cyan-500/40 text-cyan-300' : s.bg)
-                            : 'bg-white/[0.03] border-white/[0.08] text-slate-400 hover:text-slate-200'}`}>
-                          {t}
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-
-                {/* Next Service Date — exact match */}
-                <div>
-                  <label className="text-[10px] text-slate-500 uppercase tracking-wider font-medium block mb-1.5">
-                    Next Service Date (exact)
-                  </label>
-                  <div className="flex items-center gap-2">
-                    <input type="date" value={filters.serviceDate}
-                      onChange={e => setFilters(f => ({ ...f, serviceDate: e.target.value }))}
-                      className="flex-1 bg-slate-800 border border-white/[0.08] rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-cyan-500/50" />
-                    {filters.serviceDate && (
-                      <button onClick={() => setFilters(f => ({ ...f, serviceDate: '' }))}
-                        className="shrink-0 w-8 h-8 flex items-center justify-center text-slate-500 hover:text-red-400 hover:bg-red-500/10 rounded-lg transition-colors">
-                        <X className="w-4 h-4" />
-                      </button>
-                    )}
-                  </div>
-                  <p className="text-[10px] text-slate-600 mt-1">Shows only leads matching this exact date</p>
-                </div>
-
-                {/* Lead File dropdown */}
-                <div>
-                  <label className="text-[10px] text-slate-500 uppercase tracking-wider font-medium block mb-1.5 flex items-center gap-1.5">
-                    <FileSpreadsheet className="w-3 h-3" /> Lead File
-                  </label>
-                  <select value={filters.fileId}
-                    onChange={e => setFilters(f => ({ ...f, fileId: e.target.value }))}
-                    className="w-full bg-slate-800 border border-white/[0.08] rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-cyan-500/50">
-                    <option value="">All files</option>
-                    {leadFiles.map(f => (
-                      <option key={f.id} value={f.id}>{f.file_name}</option>
-                    ))}
-                  </select>
-                  <p className="text-[10px] text-slate-600 mt-1">Filter by uploaded file</p>
-                </div>
-              </div>
-            </motion.div>
-          )}
-        </AnimatePresence>
-      </div>
-
-      {/* ── Loading ───────────────────────────────────────────────────────── */}
-      {loading && (
-        <div className="flex flex-col items-center justify-center py-20 gap-4">
-          <div className="relative w-12 h-12">
-            <div className="absolute inset-0 rounded-full border-2 border-cyan-500/20" />
-            <motion.div className="absolute inset-0 rounded-full border-2 border-t-cyan-400 border-r-transparent border-b-transparent border-l-transparent"
-              animate={{ rotate: 360 }} transition={{ repeat: Infinity, duration: 1, ease: 'linear' }} />
-          </div>
-          <p className="text-sm text-slate-500">Loading lead…</p>
-        </div>
-      )}
-
-      {/* ── Empty state ───────────────────────────────────────────────────── */}
-      {!loading && !currentLead && (
-        <motion.div initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }}
-          className="flex flex-col items-center justify-center py-20 gap-4">
-          <div className="w-16 h-16 bg-emerald-500/10 border border-emerald-500/20 rounded-2xl flex items-center justify-center">
-            <CheckCircle className="w-7 h-7 text-emerald-400" />
-          </div>
-          <div className="text-center">
-            <h2 className="text-lg font-semibold text-white">
-              {hasActiveFilters ? 'No leads match your filters' : 'Queue Complete!'}
-            </h2>
-            <p className="text-sm text-slate-400 mt-1">
-              {hasActiveFilters
-                ? 'Try clearing filters to see more leads.'
-                : 'All leads have been worked through or are being handled by other callers.'}
-            </p>
-          </div>
-          {hasActiveFilters && (
-            <button onClick={() => setFilters({ serviceType: 'ALL', serviceDate: '', fileId: '' })}
-              className="px-4 py-2 text-sm bg-cyan-500/10 border border-cyan-500/30 text-cyan-400 rounded-xl hover:bg-cyan-500/20 transition-colors">
-              Clear filters
-            </button>
-          )}
-          <div className="flex gap-3 mt-2">
-            <div className="text-center px-6 py-3 bg-slate-900/80 border border-white/[0.08] rounded-xl">
-              <p className="text-2xl font-bold text-cyan-400">{callsToday}</p>
-              <p className="text-xs text-slate-500 mt-0.5">Calls made</p>
+          {filterDate && (
+            <div className="text-center">
+              <span className="inline-flex items-center gap-1 text-xs bg-blue-100 text-blue-700 px-3 py-1 rounded-full font-medium">
+                {remainingCount} lead{remainingCount !== 1 ? 's' : ''} pending for {fmtDate(filterDate)}
+              </span>
             </div>
-            <div className="text-center px-6 py-3 bg-slate-900/80 border border-white/[0.08] rounded-xl">
-              <p className="text-2xl font-bold text-emerald-400">{interestedToday}</p>
-              <p className="text-xs text-slate-500 mt-0.5">Interested</p>
-            </div>
-          </div>
-        </motion.div>
-      )}
+          )}
 
-      {/* ── Main workspace ────────────────────────────────────────────────── */}
-      {!loading && currentLead && (
-        <AnimatePresence mode="wait">
-          <motion.div key={currentLead.id}
-            initial={{ opacity: 0, x: 50 }}
-            animate={{ opacity: 1, x: 0 }}
-            exit={{ opacity: 0, x: -50 }}
-            transition={{ duration: 0.3, ease: [0.25, 0.46, 0.45, 0.94] }}
-            className="grid grid-cols-1 lg:grid-cols-[1fr_380px] gap-5 max-w-5xl mx-auto"
-          >
-            {/* ── LEFT: Customer Card ─────────────────────────────────── */}
-            <div className="bg-slate-900/80 backdrop-blur border border-white/[0.08] rounded-2xl shadow-lg shadow-cyan-500/5 overflow-hidden">
-
-              {/* Card top accent line */}
-              <div className={`h-0.5 bg-gradient-to-r ${
-                (currentLead.service_type?.toUpperCase() === 'PAID') ? 'from-amber-500/60 via-amber-400/40 to-transparent' :
-                (currentLead.service_type?.startsWith('FREE')) ? 'from-emerald-500/60 via-emerald-400/40 to-transparent' :
-                'from-cyan-500/60 via-cyan-400/40 to-transparent'
-              }`} />
-
-              {/* Header */}
-              <div className="px-6 pt-5 pb-4">
-                {effectiveSvcType && badge && (
-                  <p className={`text-[10px] font-bold tracking-[0.12em] uppercase mb-2 ${badge.header}`}>
-                    {effectiveSvcType} Customer
-                  </p>
-                )}
-                <div className="flex items-start gap-3 justify-between">
-                  <h2 className="text-2xl font-bold text-white leading-tight tracking-tight">
-                    {currentLead.customer_name || 'Unknown Customer'}
+          {/* Customer card */}
+          <div className="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden">
+            <div className="bg-gradient-to-r from-blue-600 to-blue-700 px-5 py-4">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <h2 className="text-white font-bold text-xl leading-tight truncate">
+                    {hasValue(lead.customer_name) ? lead.customer_name : 'Unknown Customer'}
                   </h2>
-                  {badge && effectiveSvcType && (
-                    <span className={`shrink-0 flex items-center gap-1.5 px-3 py-1 rounded-full border text-xs font-bold ${badge.bg}`}>
-                      <span className={`w-1.5 h-1.5 rounded-full ${badge.dot}`} />
-                      {effectiveSvcType}
-                    </span>
+                  {hasValue(lead.phone) && (
+                    <p className="text-blue-200 text-base mt-0.5 font-medium">{lead.phone}</p>
                   )}
                 </div>
-                {currentLead.phone && (
-                  <a href={`tel:${currentLead.phone}`}
-                    className="inline-flex items-center gap-1.5 mt-2 text-cyan-400 hover:text-cyan-300 font-mono text-base font-semibold transition-colors">
-                    <Phone className="w-4 h-4" />
-                    {currentLead.phone}
+                {hasValue(lead.phone) && (
+                  <a
+                    href={`tel:${lead.phone}`}
+                    className="shrink-0 bg-white text-blue-600 rounded-full p-3 hover:bg-blue-50 transition-colors shadow-md"
+                  >
+                    <Phone size={22} />
                   </a>
                 )}
               </div>
-
-              <div className="h-px bg-white/[0.06] mx-6" />
-
-              {/* Vehicle & Service Details */}
-              <div className="px-6 py-4 grid grid-cols-2 gap-4">
-
-                {/* Vehicle Details */}
-                <div className="bg-slate-800/40 rounded-xl p-3.5 col-span-2 sm:col-span-1">
-                  <p className="text-[10px] text-slate-500 font-semibold uppercase tracking-wider mb-2.5 flex items-center gap-1.5">
-                    <Car className="w-3 h-3" /> Vehicle Details
-                  </p>
-                  <p className="text-sm font-bold text-white">
-                    {currentLead.vehicle_model || '—'}
-                    {vehicleType && <span className="text-slate-400 font-normal text-xs ml-1.5">({vehicleType})</span>}
-                  </p>
-                  {currentLead.vehicle_number && (
-                    <p className="text-sm font-mono text-cyan-400 mt-0.5">{currentLead.vehicle_number}</p>
-                  )}
-                </div>
-
-                {/* Last Service */}
-                {(lastSvcDate || lastSvcKms || lastSvcType) && (
-                  <div className="bg-slate-800/40 rounded-xl p-3.5 col-span-2 sm:col-span-1">
-                    <p className="text-[10px] text-slate-500 font-semibold uppercase tracking-wider mb-2.5 flex items-center gap-1.5">
-                      <Wrench className="w-3 h-3" /> Last Service
-                    </p>
-                    {lastSvcDate && <p className="text-sm font-bold text-white">{lastSvcDate}</p>}
-                    {(lastSvcKms || lastSvcType) && (
-                      <p className="text-xs text-slate-400 mt-0.5">
-                        {lastSvcKms && <span>{lastSvcKms} Kms</span>}
-                        {lastSvcKms && lastSvcType && <span className="text-slate-600 mx-1.5">|</span>}
-                        {lastSvcType && <span>{lastSvcType}</span>}
-                      </p>
-                    )}
-                  </div>
-                )}
-
-                {/* Next Service Due */}
-                {effectiveSvcDate && (
-                  <div className={`col-span-2 rounded-xl p-3.5 border ${
-                    svcDate?.urgency === 'red'   ? 'bg-red-500/10 border-red-500/20' :
-                    svcDate?.urgency === 'amber' ? 'bg-amber-500/10 border-amber-500/20' :
-                    'bg-emerald-500/8 border-emerald-500/15'
-                  }`}>
-                    <p className="text-[10px] text-slate-500 font-semibold uppercase tracking-wider mb-1.5 flex items-center gap-1.5">
-                      <Calendar className="w-3 h-3" /> Next Service Due
-                      {effectiveSvcType && (
-                        <span className={`ml-auto px-2 py-0.5 rounded-full border text-[10px] font-bold ${badge?.bg}`}>
-                          {effectiveSvcType}
-                        </span>
-                      )}
-                    </p>
-                    <div className="flex items-center justify-between">
-                      <p className={`text-xl font-bold ${
-                        svcDate?.urgency === 'red'   ? 'text-red-300' :
-                        svcDate?.urgency === 'amber' ? 'text-amber-300' : 'text-emerald-300'
-                      }`}>
-                        {formatDisplayDate(effectiveSvcDate)}
-                      </p>
-                      {svcDate && (
-                        <span className={`text-xs font-semibold px-2.5 py-1 rounded-full border ${
-                          svcDate.urgency === 'red'   ? 'bg-red-500/15 border-red-500/30 text-red-300' :
-                          svcDate.urgency === 'amber' ? 'bg-amber-500/15 border-amber-500/30 text-amber-300' :
-                          'bg-emerald-500/15 border-emerald-500/30 text-emerald-300'
-                        }`}>
-                          {svcDate.label}
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                )}
-
-                {/* Insurance Expiry */}
-                {currentLead.insurance_expiry_date && (
-                  <div className={`col-span-2 rounded-xl p-3 border ${
-                    insDate?.urgency === 'red' ? 'bg-red-500/8 border-red-500/15' : 'bg-slate-800/40 border-white/[0.06]'
-                  }`}>
-                    <p className="text-[10px] text-slate-500 font-semibold uppercase tracking-wider mb-1 flex items-center gap-1.5">
-                      <AlertTriangle className="w-3 h-3" /> Insurance Expiry
-                    </p>
-                    <div className="flex items-center gap-3">
-                      <p className={`text-sm font-bold ${urgencyColor[insDate?.urgency ?? 'muted']}`}>
-                        {formatDisplayDate(currentLead.insurance_expiry_date)}
-                      </p>
-                      {insDate && <span className="text-xs text-slate-500">{insDate.label}</span>}
-                    </div>
-                  </div>
-                )}
-
-                {/* Address */}
-                {currentLead.address && (
-                  <div className="col-span-2 flex items-start gap-2.5">
-                    <MapPin className="w-3.5 h-3.5 text-slate-500 mt-0.5 shrink-0" />
-                    <div>
-                      <p className="text-[10px] text-slate-500 uppercase tracking-wider font-medium">Address</p>
-                      <p className="text-sm text-slate-300 mt-0.5">{currentLead.address}</p>
-                    </div>
-                  </div>
-                )}
-
-                {/* Email */}
-                {currentLead.email && (
-                  <div className="col-span-2 flex items-start gap-2.5">
-                    <Mail className="w-3.5 h-3.5 text-slate-500 mt-0.5 shrink-0" />
-                    <div>
-                      <p className="text-[10px] text-slate-500 uppercase tracking-wider font-medium">Email</p>
-                      <a href={`mailto:${currentLead.email}`} className="text-sm text-cyan-400 hover:text-cyan-300 transition-colors mt-0.5 block">
-                        {currentLead.email}
-                      </a>
-                    </div>
-                  </div>
-                )}
-
-                {/* Selling Dealer */}
-                {sellerName && (
-                  <div className="col-span-2 flex items-start gap-2.5">
-                    <Building2 className="w-3.5 h-3.5 text-slate-500 mt-0.5 shrink-0" />
-                    <div>
-                      <p className="text-[10px] text-slate-500 uppercase tracking-wider font-medium">Selling Dealer</p>
-                      <p className="text-sm text-slate-300 mt-0.5">{sellerName}</p>
-                    </div>
-                  </div>
-                )}
-
-                {/* Other extra_data fields */}
-                {otherExtras.map(([key, val]) => (
-                  <div key={key} className="col-span-2 sm:col-span-1 flex items-start gap-2.5">
-                    <Gauge className="w-3.5 h-3.5 text-slate-500 mt-0.5 shrink-0" />
-                    <div>
-                      <p className="text-[10px] text-slate-500 uppercase tracking-wider font-medium">{key}</p>
-                      <p className="text-sm text-slate-300 mt-0.5">{val}</p>
-                    </div>
-                  </div>
-                ))}
-              </div>
-
-              {/* Call + WhatsApp buttons */}
-              <div className="px-6 pb-5 flex gap-3">
-                <a href={`tel:${currentLead.phone}`}
-                  className="flex-1 flex items-center justify-center gap-2 py-3 bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-emerald-400 font-semibold text-sm rounded-xl transition-all">
-                  <Phone className="w-4 h-4" /> Call
-                </a>
-                {currentLead.phone && (
-                  <button
-                    onClick={handleWhatsApp}
-                    className="flex-1 flex items-center justify-center gap-2 py-3 bg-[#25D366]/10 hover:bg-[#25D366]/20 border border-[#25D366]/30 text-[#25D366] hover:text-[#4AE07A] font-semibold text-sm rounded-xl transition-all">
-                    <MessageCircle className="w-4 h-4" /> WhatsApp
-                  </button>
-                )}
-              </div>
             </div>
 
-            {/* ── RIGHT: Action Form ──────────────────────────────────── */}
-            <div className="bg-slate-900/80 backdrop-blur border border-white/[0.08] rounded-2xl p-6 flex flex-col gap-4">
-              <h3 className="text-sm font-bold text-slate-200 flex items-center gap-2 pb-2 border-b border-white/[0.06]">
-                <Zap className="w-4 h-4 text-cyan-400" />
-                Log Call Status
-              </h3>
+            <div className="p-4 space-y-4">
 
-              {/* Outcome */}
-              <div>
-                <label className="text-[10px] text-slate-500 uppercase tracking-wider font-medium block mb-1.5">
-                  Outcome <span className="text-red-400">*</span>
-                </label>
-                <div className="relative">
-                  <select value={selectedAction}
-                    onChange={e => setSelectedAction(e.target.value as CallAction | '')}
-                    className="w-full appearance-none bg-slate-800 border border-white/[0.08] rounded-xl px-4 py-3 text-sm text-slate-200 focus:outline-none focus:border-cyan-500/50 focus:ring-1 focus:ring-cyan-500/20 pr-10">
-                    <option value="" disabled>Select outcome…</option>
-                    {ACTION_OPTIONS.map(opt => (
-                      <option key={opt.value} value={opt.value}>{opt.label}</option>
-                    ))}
-                  </select>
-                  <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500 pointer-events-none" />
-                </div>
-                {selectedMeta && (
-                  <div className={`flex items-center gap-1.5 mt-1.5 text-xs font-medium ${selectedMeta.color}`}>
-                    <selectedMeta.icon className="w-3 h-3" />
-                    {selectedMeta.label}
+              {hasVehicleInfo && (
+                <section>
+                  <p className="text-[11px] font-bold text-gray-400 uppercase tracking-widest mb-2">Vehicle Details</p>
+                  <div className="grid grid-cols-2 gap-3">
+                    <Field label="Registration No." value={lead.vehicle_number} />
+                    <Field label="Model" value={lead.vehicle_model} />
                   </div>
-                )}
-              </div>
-
-              {/* Follow-up date */}
-              {selectedAction === 'call_later' && (
-                <div>
-                  <label className="text-[10px] text-slate-500 uppercase tracking-wider font-medium block mb-1.5">
-                    Follow-up Date <span className="text-red-400">*</span>
-                  </label>
-                  <input type="date" value={followUpDate} min={todayStr}
-                    onChange={e => setFollowUpDate(e.target.value)}
-                    className="w-full bg-slate-800 border border-white/[0.08] rounded-xl px-4 py-3 text-sm text-slate-200 focus:outline-none focus:border-cyan-500/50" />
-                </div>
+                </section>
               )}
 
-              {/* Notes */}
-              <div className="flex-1">
-                <label className="text-[10px] text-slate-500 uppercase tracking-wider font-medium block mb-1.5">
-                  Customer Remarks
-                  {NOTES_REQUIRED.includes(selectedAction as CallAction) && <span className="text-red-400 ml-1">*</span>}
-                </label>
-                <textarea ref={notesRef} value={notes} onChange={e => setNotes(e.target.value)}
-                  rows={5} placeholder="Enter details of conversation, objections, context…"
-                  className="w-full bg-slate-800 border border-white/[0.08] rounded-xl px-4 py-3 text-sm text-slate-200 placeholder-slate-600 resize-none focus:outline-none focus:border-cyan-500/50 focus:ring-1 focus:ring-cyan-500/20" />
-              </div>
+              {hasServiceInfo && (
+                <section className="bg-amber-50 rounded-xl border border-amber-100 p-3">
+                  <p className="text-[11px] font-bold text-amber-700 uppercase tracking-widest mb-2">Service Info</p>
+                  <div className="grid grid-cols-2 gap-3">
+                    <Field label="Next Service Date" value={fmtDate(lead.next_service_date)} />
+                    <Field label="Next Service Type" value={lead.next_service_type} />
+                    <Field label="Last Service Date" value={fmtDate(lead.service_pending_date)} />
+                    <Field label="Last Service Type" value={lead.service_type} />
+                  </div>
+                </section>
+              )}
 
-              {/* Buttons */}
-              <div className="space-y-2.5">
-                <motion.button onClick={handleSave}
-                  disabled={!selectedAction || saving}
-                  whileHover={{ scale: 1.01 }} whileTap={{ scale: 0.99 }}
-                  className="w-full flex items-center justify-center gap-2 py-3 bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 disabled:from-slate-700 disabled:to-slate-700 text-white text-sm font-bold rounded-xl transition-all shadow-lg shadow-cyan-500/20 disabled:shadow-none disabled:cursor-not-allowed">
-                  {saving ? (
-                    <motion.div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full"
-                      animate={{ rotate: 360 }} transition={{ repeat: Infinity, duration: 0.8, ease: 'linear' }} />
-                  ) : <Save className="w-4 h-4" />}
-                  {saving ? 'Saving…' : 'Save & Load Next'}
-                  {!saving && <TrendingUp className="w-3.5 h-3.5 opacity-70" />}
-                </motion.button>
+              {hasInsurance && (
+                <section className="bg-red-50 rounded-xl border border-red-100 p-3">
+                  <Field label="Insurance Expiry" value={fmtDate(lead.insurance_expiry_date)} />
+                </section>
+              )}
 
-                <button onClick={handleSkip}
-                  className="w-full flex items-center justify-center gap-1.5 py-2.5 text-xs text-slate-500 hover:text-slate-300 border border-white/[0.06] rounded-xl hover:bg-white/[0.03] transition-all">
-                  <SkipForward className="w-3.5 h-3.5" />
-                  Skip this lead
-                </button>
+              {hasContactInfo && (
+                <section>
+                  <div className="grid grid-cols-1 gap-2">
+                    <Field label="Address" value={lead.address} />
+                    <Field label="Email" value={lead.email} />
+                  </div>
+                </section>
+              )}
 
-                <p className="text-center text-[10px] text-slate-700">
-                  Press <kbd className="px-1 py-0.5 bg-slate-800 border border-white/[0.08] rounded font-mono text-slate-500">S</kbd> to save
-                </p>
-              </div>
+              {hasExtra && (
+                <section className="bg-gray-50 rounded-xl border border-gray-200 p-3">
+                  <p className="text-[11px] font-bold text-gray-400 uppercase tracking-widest mb-2">Additional Info</p>
+                  <div className="grid grid-cols-2 gap-3">
+                    {extraEntries.map(([key, val]) => (
+                      <Field key={key} label={key} value={String(val)} />
+                    ))}
+                  </div>
+                </section>
+              )}
+
             </div>
-          </motion.div>
-        </AnimatePresence>
-      )}
+          </div>
+
+          {/* Call outcome */}
+          <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-4 space-y-4">
+            <h3 className="font-semibold text-gray-900 flex items-center gap-2 text-sm">
+              <PhoneCall size={16} className="text-blue-600" /> Log Call Outcome
+            </h3>
+
+            <div className="grid grid-cols-2 gap-2">
+              {OUTCOMES.map((o) => (
+                <button
+                  key={o}
+                  onClick={() => setOutcome(o)}
+                  className={`text-left text-sm px-3 py-2 rounded-xl border transition-all ${
+                    outcome === o
+                      ? 'border-blue-600 bg-blue-50 text-blue-700 font-semibold shadow-sm'
+                      : 'border-gray-200 hover:border-gray-300 text-gray-700'
+                  }`}
+                >
+                  {o}
+                </button>
+              ))}
+            </div>
+
+            {outcome.toLowerCase().includes('callback') && (
+              <div>
+                <label className="block text-sm text-gray-600 mb-1 flex items-center gap-1">
+                  <Calendar size={14} /> Callback Date &amp; Time
+                </label>
+                <input
+                  type="datetime-local"
+                  value={callback}
+                  onChange={(e) => setCallback(e.target.value)}
+                  className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+              </div>
+            )}
+
+            <div>
+              <label className="block text-sm text-gray-600 mb-1">Notes (optional)</label>
+              <textarea
+                value={notes}
+                onChange={(e) => setNotes(e.target.value)}
+                rows={3}
+                placeholder="Add notes about the call..."
+                className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none"
+              />
+            </div>
+
+            <button
+              onClick={submitCall}
+              disabled={!outcome || saving}
+              className="w-full bg-blue-600 text-white py-3 rounded-xl font-semibold hover:bg-blue-700 disabled:opacity-40 transition-colors flex items-center justify-center gap-2 text-sm"
+            >
+              {saving ? (
+                <><div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white" /> Saving...</>
+              ) : (
+                <><Save size={16} /> Save &amp; Next Lead</>
+              )}
+            </button>
+          </div>
+
+        </div>
+      </div>
     </div>
-  );
+  )
 }
