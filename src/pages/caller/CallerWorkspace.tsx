@@ -8,7 +8,7 @@ import {
 import toast from 'react-hot-toast';
 import { supabase } from '../../lib/supabase';
 import { useAuth } from '../../contexts/AuthContext';
-import type { Lead, CallAction, LeadStatus } from '../../types/database';
+import type { Lead, Dealer, CallAction, LeadStatus } from '../../types/database';
 import { getNextServiceDate, getNextServiceType } from '../../types/database';
 
 const OUTCOMES: { label: string; action: CallAction; status: LeadStatus }[] = [
@@ -52,6 +52,7 @@ export default function CallerWorkspace() {
   const [showDateDropdown, setShowDateDropdown] = useState(false);
   const [showServiceDropdown, setShowServiceDropdown] = useState(false);
 
+  const [dealer, setDealer] = useState<Dealer | null>(null);
   const [wsState, setWsState] = useState<WorkspaceState>('loading');
   const [lead, setLead] = useState<Lead | null>(null);
   const [remainingCount, setRemainingCount] = useState(0);
@@ -63,6 +64,16 @@ export default function CallerWorkspace() {
   const [saving, setSaving] = useState(false);
 
   const lockedLeadId = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!profile?.dealer_id) return;
+    supabase
+      .from('dealers')
+      .select('*')
+      .eq('id', profile.dealer_id)
+      .maybeSingle()
+      .then(({ data }) => setDealer(data as Dealer | null));
+  }, [profile?.dealer_id]);
 
   const loadFilterOptions = useCallback(async () => {
     if (!profile?.dealer_id) return;
@@ -197,6 +208,19 @@ export default function CallerWorkspace() {
       toast.error(err instanceof Error ? err.message : 'Failed to save call');
       setSaving(false);
     }
+  }
+
+  function buildWhatsAppUrl() {
+    if (!lead?.phone) return '#';
+    const phone = lead.phone.replace(/\D/g, '');
+    const name = lead.customer_name ?? 'Customer';
+    const model = lead.vehicle_model ?? 'Vehicle';
+    const nst = nextServiceType ?? '';
+    const nsd = nextServiceDate ? fmtDate(nextServiceDate) : '';
+    const dname = dealer?.company_name ?? '';
+    const msg =
+      `Hye,\nDear, ${name}\nApki Honda ${model} Ki ${nst} ${nsd} Ko\nSchedulel He to Kripya Karke ${dname} Par Akke Service Karaye.\n${dname}`;
+    return `https://wa.me/${phone}?text=${encodeURIComponent(msg)}`;
   }
 
   function skipLead() {
@@ -366,6 +390,7 @@ export default function CallerWorkspace() {
 
   const nextServiceDate = getNextServiceDate(lead);
   const nextServiceType = getNextServiceType(lead);
+  const whatsappUrl = buildWhatsAppUrl();
 
   // Additional info: all extra_data keys EXCEPT the ones shown in Service Info.
   const extraEntries = Object.entries(lead.extra_data ?? {}).filter(
@@ -400,10 +425,14 @@ export default function CallerWorkspace() {
               {lead.phone && (
                 <a
                   href={`tel:${lead.phone}`}
-                  className="inline-flex items-center gap-2 mt-2 text-cyan-400 hover:text-cyan-300 transition-colors"
+                  className="inline-flex items-center gap-2.5 mt-3 group"
                 >
-                  <Phone className="w-4 h-4 shrink-0" />
-                  <span className="text-xl font-bold font-mono tracking-wider">{lead.phone}</span>
+                  <span className="w-9 h-9 rounded-full bg-red-500 flex items-center justify-center shrink-0 group-hover:bg-red-400 transition-colors shadow-lg shadow-red-500/30">
+                    <Phone className="w-4 h-4 text-white" fill="white" />
+                  </span>
+                  <span className="text-2xl font-extrabold font-mono tracking-widest text-white group-hover:text-cyan-300 transition-colors">
+                    {lead.phone}
+                  </span>
                 </a>
               )}
             </div>
@@ -473,19 +502,19 @@ export default function CallerWorkspace() {
                 {lead.phone && (
                   <a
                     href={`tel:${lead.phone}`}
-                    className="flex items-center justify-center gap-2 bg-emerald-500 hover:bg-emerald-400 text-white font-bold py-3 rounded-xl text-base transition-all hover:shadow-lg hover:shadow-emerald-500/30"
+                    className="flex items-center justify-center gap-2 bg-emerald-500 hover:bg-emerald-400 active:scale-95 text-white font-bold py-3 rounded-xl text-base transition-all hover:shadow-lg hover:shadow-emerald-500/30"
                   >
-                    <Phone size={18} /> Call
+                    <Phone size={18} fill="white" /> Call Now
                   </a>
                 )}
                 {lead.phone && (
                   <a
-                    href={`https://wa.me/${lead.phone.replace(/\D/g, '')}`}
+                    href={whatsappUrl}
                     target="_blank"
                     rel="noreferrer"
-                    className="flex items-center justify-center gap-2 bg-slate-700 hover:bg-slate-600 border border-white/[0.1] text-white font-bold py-3 rounded-xl text-base transition-all"
+                    className="flex items-center justify-center gap-2 bg-[#25D366] hover:bg-[#1fb855] active:scale-95 text-white font-bold py-3 rounded-xl text-base transition-all hover:shadow-lg hover:shadow-green-500/30"
                   >
-                    <MessageCircle size={18} /> WhatsApp
+                    <MessageCircle size={18} fill="white" stroke="none" /> WhatsApp
                   </a>
                 )}
               </div>
