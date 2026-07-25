@@ -15,6 +15,7 @@ import * as XLSX from 'xlsx';
 import { supabase } from '../../lib/supabase';
 import { useAuth } from '../../contexts/AuthContext';
 import type { Profile, CallAction } from '../../types/database';
+import { getNextServiceDate, getNextServiceType } from '../../types/database';
 import toast from 'react-hot-toast';
 
 /* ─── Types ─────────────────────────────────────────────────────────────── */
@@ -26,8 +27,6 @@ interface LeadRow {
   vehicle_model: string | null;
   service_type: string | null;
   service_pending_date: string | null;
-  next_service_date: string | null;
-  next_service_type: string | null;
   insurance_expiry_date: string | null;
   address: string | null;
   email: string | null;
@@ -106,8 +105,6 @@ const STANDARD_EXPORT_FIELDS: { key: keyof LeadRow; label: string }[] = [
   { key: 'vehicle_model', label: 'Vehicle Model' },
   { key: 'service_type', label: 'Service Type' },
   { key: 'service_pending_date', label: 'Service Pending Date' },
-  { key: 'next_service_date', label: 'Next Service Date' },
-  { key: 'next_service_type', label: 'Next Service Type' },
   { key: 'insurance_expiry_date', label: 'Insurance Expiry Date' },
   { key: 'address', label: 'Address' },
   { key: 'email', label: 'Email' },
@@ -147,8 +144,7 @@ export default function DealerAnalytics() {
           .select(
             `id, caller_id, lead_id, action, excuse_notes, follow_up_date, called_at,
              leads ( id, customer_name, phone, vehicle_number, vehicle_model, service_type,
-                     service_pending_date, next_service_date, next_service_type,
-                     insurance_expiry_date, address, email, extra_data )`
+                     service_pending_date, insurance_expiry_date, address, email, extra_data )`
           )
           .eq('dealer_id', dealerId)
           .gte('called_at', startOfDayUtc(dateFrom))
@@ -197,7 +193,7 @@ export default function DealerAnalytics() {
   /* ─── Derived / filtered data ───────────────────────────────────────── */
   const filteredLogs = logs.filter((log) => {
     if (callerFilter !== 'all' && log.caller_id !== callerFilter) return false;
-    const svc = log.lead?.service_type ?? log.lead?.next_service_type ?? null;
+    const svc = log.lead?.service_type ?? (log.lead ? getNextServiceType(log.lead) : null) ?? null;
     if (serviceFilter !== 'all' && svc !== serviceFilter) return false;
     return true;
   });
@@ -205,7 +201,7 @@ export default function DealerAnalytics() {
   const serviceTypes = Array.from(
     new Set(
       logs
-        .map((l) => l.lead?.service_type ?? l.lead?.next_service_type ?? null)
+        .map((l) => l.lead?.service_type ?? (l.lead ? getNextServiceType(l.lead) : null) ?? null)
         .filter(Boolean) as string[]
     )
   ).sort();
@@ -261,6 +257,12 @@ export default function DealerAnalytics() {
           row[field.label] = val === null || val === undefined ? '' : String(val);
         }
 
+        // Next Service Date / Type are stored inside extra_data (jsonb).
+        const nsd = log.lead ? getNextServiceDate(log.lead) : null;
+        const nst = log.lead ? getNextServiceType(log.lead) : null;
+        row['Next Service Date'] = nsd ?? '';
+        row['Next Service Type'] = nst ?? '';
+
         // 2. All metadata (JSONB extra_data) columns
         const extra = log.lead?.extra_data;
         for (const key of sortedMetadataKeys) {
@@ -283,7 +285,7 @@ export default function DealerAnalytics() {
       XLSX.utils.book_append_sheet(wb, ws, 'Done Calls');
 
       // Auto-size columns based on content width
-      const allKeys = [...STANDARD_EXPORT_FIELDS.map(f => f.label), ...sortedMetadataKeys, 'Caller Name', 'Call Date', 'Call Excuse / Disposition'];
+      const allKeys = [...STANDARD_EXPORT_FIELDS.map(f => f.label), 'Next Service Date', 'Next Service Type', ...sortedMetadataKeys, 'Caller Name', 'Call Date', 'Call Excuse / Disposition'];
       ws['!cols'] = allKeys.map((key) => ({
         wch: Math.max(
           key.length + 2,

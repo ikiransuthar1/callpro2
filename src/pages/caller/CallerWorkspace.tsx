@@ -8,6 +8,7 @@ import toast from 'react-hot-toast';
 import { supabase } from '../../lib/supabase';
 import { useAuth } from '../../contexts/AuthContext';
 import type { Lead, CallAction, LeadStatus } from '../../types/database';
+import { getNextServiceDate, getNextServiceType } from '../../types/database';
 
 const OUTCOMES: { label: string; action: CallAction; status: LeadStatus }[] = [
   { label: 'Answered - Interested', action: 'interested', status: 'completed' },
@@ -74,23 +75,27 @@ export default function CallerWorkspace() {
 
   const lockedLeadId = useRef<string | null>(null);
 
-  // Fetch the distinct next_service_date and next_service_type values for the filter dropdowns.
+  // Fetch pending leads to derive distinct next_service_date / next_service_type
+  // filter options from extra_data (jsonb), since the dedicated columns are
+  // not reliably exposed by PostgREST's schema cache.
   const loadFilterOptions = useCallback(async () => {
     if (!profile?.dealer_id) return;
     const { data } = await supabase
       .from('leads')
-      .select('next_service_date, next_service_type')
+      .select('extra_data')
       .eq('dealer_id', profile.dealer_id)
       .eq('status', 'pending')
       .is('locked_by', null);
 
-    const dates = Array.from(
-      new Set((data ?? []).map((r) => r.next_service_date).filter(Boolean) as string[]),
-    ).sort();
-    const serviceTypes = Array.from(
-      new Set((data ?? []).map((r) => r.next_service_type).filter(Boolean) as string[]),
-    ).sort();
-    setFilterOptions({ dates, serviceTypes });
+    const dateSet = new Set<string>();
+    const typeSet = new Set<string>();
+    for (const r of (data ?? []) as Pick<Lead, 'extra_data'>[]) {
+      const d = getNextServiceDate(r);
+      if (d) dateSet.add(d);
+      const t = getNextServiceType(r);
+      if (t) typeSet.add(t);
+    }
+    setFilterOptions({ dates: Array.from(dateSet).sort(), serviceTypes: Array.from(typeSet).sort() });
   }, [profile?.dealer_id]);
 
   const fetchNextLead = useCallback(async (releasedId?: string) => {
@@ -117,34 +122,43 @@ export default function CallerWorkspace() {
       .eq('status', 'pending')
       .is('locked_by', null);
 
-    // Date column is DATE (YYYY-MM-DD) — exact string match avoids timezone skew.
-    if (filterDate) query = query.eq('next_service_date', filterDate);
-    if (filterServiceType) query = query.eq('next_service_type', filterServiceType);
+    // No server-side jsonb-equality filters: fetch the next unlocked pending
+    // lead and apply next_service_date / next_service_type filters client-side.
+    const fetchBatch = async (): Promise<{ candidate: Lead | null; remaining: number }> => {
+      let candidate: Lead | null = null;
+      let remaining = 0;
+      // Page through pending leads until one matches the active filters.
+      let page = 0;
+      const PAGE = 100;
+      while (true) {
+        const { data } = await query
+          .order('sort_order', { ascending: true })
+          .range(page * PAGE, page * PAGE + PAGE - 1);
+        const rows = (data ?? []) as Lead[];
+        if (rows.length === 0) break;
+        for (const row of rows) {
+          if (filterDate && getNextServiceDate(row) !== filterDate) continue;
+          if (filterServiceType && getNextServiceType(row) !== filterServiceType) continue;
+          if (!candidate) candidate = row;
+          remaining++;
+        }
+        if (candidate || rows.length < PAGE) break;
+        page++;
+      }
+      return { candidate, remaining };
+    };
 
-    const { data } = await query
-      .order('sort_order', { ascending: true })
-      .limit(1)
-      .maybeSingle();
+    const { candidate, remaining } = await fetchBatch();
 
-    if (data) {
+    if (candidate) {
       await supabase
         .from('leads')
         .update({ locked_by: profile.id, locked_at: new Date().toISOString() })
-        .eq('id', data.id);
+        .eq('id', candidate.id);
 
-      lockedLeadId.current = data.id;
-      setLead(data as Lead);
-
-      let countQ = supabase
-        .from('leads')
-        .select('id', { count: 'exact', head: true })
-        .eq('dealer_id', profile.dealer_id)
-        .eq('status', 'pending')
-        .is('locked_by', null);
-      if (filterDate) countQ = countQ.eq('next_service_date', filterDate);
-      if (filterServiceType) countQ = countQ.eq('next_service_type', filterServiceType);
-      const { count } = await countQ;
-      setRemainingCount(count ?? 0);
+      lockedLeadId.current = candidate.id;
+      setLead(candidate);
+      setRemainingCount(remaining);
       setWsState('has_lead');
     } else {
       setLead(null);
@@ -457,8 +471,8 @@ export default function CallerWorkspace() {
               <section className="bg-amber-500/[0.08] border border-amber-500/20 rounded-xl p-3">
                 <p className="text-[10px] font-bold text-amber-400/80 uppercase tracking-widest mb-2">Service Info</p>
                 <div className="grid grid-cols-2 gap-3">
-                  <Field label="Next Service Date" value={fmtDate(lead.next_service_date)} />
-                  <Field label="Next Service Type" value={lead.next_service_type} />
+                  <Field label="Next Service Date" value={fmtDate(getNextServiceDate(lead))} />
+                  <Field label="Next Service Type" value={getNextServiceType(lead)} />
                   <Field label="Last Service Date" value={fmtDate(lead.service_pending_date)} />
                   <Field label="Last Service Type" value={lead.service_type} />
                 </div>

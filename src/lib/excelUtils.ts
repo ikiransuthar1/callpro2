@@ -140,8 +140,6 @@ export interface MappedLeadFields {
   insurance_expiry_date: string | null;
   address: string | null;
   email: string | null;
-  next_service_date: string | null;
-  next_service_type: string | null;
   extra_data: Record<string, string> | null;
 }
 
@@ -188,6 +186,13 @@ export function buildLeadFromRow(
   const nextServiceDate =
     parseExcelDate(mapping.next_service_date ? row[mapping.next_service_date] : null) ??
     computeNextServiceDate(lastServiceDate);
+  const nextServiceType = get(mapping.next_service_type);
+
+  // next_service_date / next_service_type live inside extra_data (jsonb) to
+  // avoid PostgREST schema-cache issues with dedicated columns. The frontend
+  // reads them back via getNextServiceDate / getNextServiceType helpers.
+  if (nextServiceDate) extra['next_service_date'] = nextServiceDate;
+  if (nextServiceType) extra['next_service_type'] = nextServiceType;
 
   return {
     customer_name: get(mapping.customer_name),
@@ -201,8 +206,6 @@ export function buildLeadFromRow(
     ),
     address: get(mapping.address),
     email: get(mapping.email),
-    next_service_date: nextServiceDate,
-    next_service_type: get(mapping.next_service_type),
     extra_data: Object.keys(extra).length > 0 ? extra : null,
   };
 }

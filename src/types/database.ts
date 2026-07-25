@@ -49,14 +49,10 @@ export interface Lead {
   phone: string | null;
   vehicle_number: string | null;
   vehicle_model: string | null;
-  /** Legacy column — kept for back-compat. Use next_service_type for new data. */
+  /** Last Service Type (legacy dedicated column). */
   service_type: string | null;
-  /** Legacy column — kept for back-compat. Use next_service_date for new data. */
+  /** Last Service Date (legacy dedicated column, YYYY-MM-DD). */
   service_pending_date: string | null;
-  /** Canonical "Next Service Type" (e.g. FREE 01, PAID). Populated from upload. */
-  next_service_type: string | null;
-  /** Canonical "Next Service Date" stored as YYYY-MM-DD. Populated from upload. */
-  next_service_date: string | null;
   insurance_expiry_date: string | null;
   address: string | null;
   email: string | null;
@@ -68,6 +64,26 @@ export interface Lead {
   sort_order: number;
   created_at: string;
   updated_at: string;
+}
+
+/* next_service_date / next_service_type live inside extra_data (jsonb) to
+ * avoid PostgREST schema-cache issues with dedicated columns. These helpers
+ * read them back uniformly across the app. */
+export const NEXT_SERVICE_DATE_KEY = 'next_service_date';
+export const NEXT_SERVICE_TYPE_KEY = 'next_service_type';
+
+export function getNextServiceDate(lead: Pick<Lead, 'extra_data'>): string | null {
+  const ed = lead.extra_data;
+  const v = ed && typeof ed === 'object' ? (ed as Record<string, unknown>)[NEXT_SERVICE_DATE_KEY] : undefined;
+  const s = v === null || v === undefined ? null : String(v).trim();
+  return s || null;
+}
+
+export function getNextServiceType(lead: Pick<Lead, 'extra_data'>): string | null {
+  const ed = lead.extra_data;
+  const v = ed && typeof ed === 'object' ? (ed as Record<string, unknown>)[NEXT_SERVICE_TYPE_KEY] : undefined;
+  const s = v === null || v === undefined ? null : String(v).trim();
+  return s || null;
 }
 
 export interface CallLog {
