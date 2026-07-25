@@ -1,31 +1,44 @@
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
-import { AuthProvider, useAuth } from './contexts/AuthContext'
-import Login from './pages/Login'
-import DealerLayout from './pages/dealer/DealerLayout'
-import DealerDashboard from './pages/dealer/DealerDashboard'
-import LeadFiles from './pages/dealer/LeadFiles'
-import CallerManagement from './pages/dealer/CallerManagement'
-import CallerLayout from './pages/caller/CallerLayout'
-import CallerWorkspace from './pages/caller/CallerWorkspace'
-import FounderLayout from './pages/founder/FounderLayout'
-import FounderDashboard from './pages/founder/FounderDashboard'
+import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
+import { AuthProvider, useAuth } from './contexts/AuthContext';
+import AppLayout from './components/AppLayout';
+import LoginPage from './pages/LoginPage';
+import FounderDashboard from './pages/founder/FounderDashboard';
+import DealerManagement from './pages/founder/DealerManagement';
+import FounderAnalytics from './pages/founder/FounderAnalytics';
+import DealerDashboard from './pages/dealer/DealerDashboard';
+import CallerManagement from './pages/dealer/CallerManagement';
+import LeadFiles from './pages/dealer/LeadFiles';
+import DealerAnalytics from './pages/dealer/DealerAnalytics';
+import CallerWorkspace from './pages/caller/CallerWorkspace';
+import FollowUps from './pages/caller/FollowUps';
+import type { UserRole } from './types/database';
 
-function RoleRouter() {
-  const { profile, loading } = useAuth()
-  if (loading) return <div className="min-h-screen flex items-center justify-center"><div className="animate-spin rounded-full h-10 w-10 border-b-2 border-blue-600" /></div>
-  if (!profile) return <Navigate to="/login" replace />
-  if (profile.role === 'founder') return <Navigate to="/founder" replace />
-  if (profile.role === 'dealer') return <Navigate to="/dealer" replace />
-  if (profile.role === 'caller') return <Navigate to="/caller" replace />
-  return <Navigate to="/login" replace />
+function FullScreenLoader() {
+  return (
+    <div className="min-h-screen bg-[#080C14] flex items-center justify-center">
+      <div className="w-10 h-10 border-2 border-cyan-400/30 border-t-cyan-400 rounded-full animate-spin" />
+    </div>
+  );
 }
 
-function RequireAuth({ children, roles }: { children: React.ReactNode; roles: string[] }) {
-  const { profile, loading } = useAuth()
-  if (loading) return null
-  if (!profile) return <Navigate to="/login" replace />
-  if (!roles.includes(profile.role)) return <Navigate to="/" replace />
-  return <>{children}</>
+function RoleRouter() {
+  const { profile, loading } = useAuth();
+  if (loading) return <FullScreenLoader />;
+  if (!profile) return <Navigate to="/login" replace />;
+  const home: Record<UserRole, string> = {
+    founder: '/founder',
+    dealer: '/dealer',
+    caller: '/caller',
+  };
+  return <Navigate to={home[profile.role]} replace />;
+}
+
+function RequireAuth({ children, role }: { children: React.ReactNode; role: UserRole }) {
+  const { profile, loading } = useAuth();
+  if (loading) return <FullScreenLoader />;
+  if (!profile) return <Navigate to="/login" replace />;
+  if (profile.role !== role) return <Navigate to="/" replace />;
+  return <AppLayout>{children}</AppLayout>;
 }
 
 export default function App() {
@@ -33,21 +46,27 @@ export default function App() {
     <AuthProvider>
       <BrowserRouter>
         <Routes>
-          <Route path="/login" element={<Login />} />
+          <Route path="/login" element={<LoginPage />} />
           <Route path="/" element={<RoleRouter />} />
-          <Route path="/dealer" element={<RequireAuth roles={['dealer']}><DealerLayout /></RequireAuth>}>
-            <Route index element={<DealerDashboard />} />
-            <Route path="files" element={<LeadFiles />} />
-            <Route path="callers" element={<CallerManagement />} />
-          </Route>
-          <Route path="/caller" element={<RequireAuth roles={['caller']}><CallerLayout /></RequireAuth>}>
-            <Route index element={<CallerWorkspace />} />
-          </Route>
-          <Route path="/founder" element={<RequireAuth roles={['founder']}><FounderLayout /></RequireAuth>}>
-            <Route index element={<FounderDashboard />} />
-          </Route>
+
+          {/* Founder */}
+          <Route path="/founder" element={<RequireAuth role="founder"><FounderDashboard /></RequireAuth>} />
+          <Route path="/founder/dealers" element={<RequireAuth role="founder"><DealerManagement /></RequireAuth>} />
+          <Route path="/founder/analytics" element={<RequireAuth role="founder"><FounderAnalytics /></RequireAuth>} />
+
+          {/* Dealer */}
+          <Route path="/dealer" element={<RequireAuth role="dealer"><DealerDashboard /></RequireAuth>} />
+          <Route path="/dealer/callers" element={<RequireAuth role="dealer"><CallerManagement /></RequireAuth>} />
+          <Route path="/dealer/files" element={<RequireAuth role="dealer"><LeadFiles /></RequireAuth>} />
+          <Route path="/dealer/analytics" element={<RequireAuth role="dealer"><DealerAnalytics /></RequireAuth>} />
+
+          {/* Caller */}
+          <Route path="/caller" element={<RequireAuth role="caller"><CallerWorkspace /></RequireAuth>} />
+          <Route path="/caller/followups" element={<RequireAuth role="caller"><FollowUps /></RequireAuth>} />
+
+          <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </BrowserRouter>
     </AuthProvider>
-  )
+  );
 }

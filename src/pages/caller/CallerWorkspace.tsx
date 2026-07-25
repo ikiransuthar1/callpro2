@@ -1,80 +1,87 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
-import { Phone, PhoneOff, PhoneCall, Calendar, Save, Filter, X } from 'lucide-react'
-import { supabase, Lead } from '../../lib/supabase'
-import { useAuth } from '../../contexts/AuthContext'
+import { useState, useEffect, useCallback, useRef } from 'react';
+import { useNavigate } from 'react-router-dom';
+import { motion } from 'framer-motion';
+import {
+  Phone, PhoneCall, Calendar, Save, Filter, X, PhoneOff,
+} from 'lucide-react';
+import toast from 'react-hot-toast';
+import { supabase } from '../../lib/supabase';
+import { useAuth } from '../../contexts/AuthContext';
+import type { Lead, CallAction, LeadStatus } from '../../types/database';
 
-const OUTCOMES = [
-  'Answered - Interested',
-  'Answered - Not Interested',
-  'No Answer',
-  'Busy',
-  'Callback Scheduled',
-  'Wrong Number',
-  'Completed',
-]
+const OUTCOMES: { label: string; action: CallAction; status: LeadStatus }[] = [
+  { label: 'Answered - Interested', action: 'interested', status: 'completed' },
+  { label: 'Answered - Not Interested', action: 'not_interested', status: 'not_interested' },
+  { label: 'No Answer', action: 'no_answer', status: 'called' },
+  { label: 'Busy', action: 'busy', status: 'called' },
+  { label: 'Callback Scheduled', action: 'call_later', status: 'follow_up' },
+  { label: 'Wrong Number', action: 'wrong_number', status: 'completed' },
+  { label: 'Completed', action: 'completed', status: 'completed' },
+];
 
 function fmtDate(d: string | null) {
-  if (!d) return null
+  if (!d) return null;
   try {
-    return new Date(d + 'T00:00:00').toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })
+    const [y, m, day] = d.split('-');
+    return new Date(Number(y), Number(m) - 1, Number(day)).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
   } catch {
-    return d
+    return d;
   }
 }
 
-// Robust blank check: null, undefined, empty string, whitespace-only, "null"/"undefined" strings
+// Robust blank check — hides null, empty, whitespace, and placeholder strings
 function hasValue(v: unknown): boolean {
-  if (v === null || v === undefined) return false
-  const s = String(v).trim()
-  if (s === '' || s === '-' || s.toLowerCase() === 'null' || s.toLowerCase() === 'undefined' || s.toLowerCase() === 'na' || s.toLowerCase() === 'n/a') return false
-  return true
+  if (v === null || v === undefined) return false;
+  const s = String(v).trim();
+  if (s === '' || s === '-' || s.toLowerCase() === 'null' || s.toLowerCase() === 'undefined' || s.toLowerCase() === 'na' || s.toLowerCase() === 'n/a') return false;
+  return true;
 }
 
-// Field component: only renders if value is present and non-blank
 function Field({ label, value }: { label: string; value: string | null | undefined }) {
-  if (!hasValue(value)) return null
+  if (!hasValue(value)) return null;
   return (
-    <div>
-      <p className="text-[11px] font-semibold text-gray-400 uppercase tracking-wide">{label}</p>
-      <p className="text-sm text-gray-900 mt-0.5 break-words">{String(value).trim()}</p>
+    <div className="min-w-0">
+      <p className="text-[10px] font-medium text-slate-500 uppercase tracking-wider">{label}</p>
+      <p className="text-sm text-slate-200 mt-0.5 break-words">{String(value).trim()}</p>
     </div>
-  )
+  );
 }
 
-type WorkspaceState = 'loading' | 'has_lead' | 'no_leads_for_date' | 'all_done'
+type WorkspaceState = 'loading' | 'has_lead' | 'no_leads_for_date' | 'all_done';
 
 export default function CallerWorkspace() {
-  const { profile } = useAuth()
+  const { profile } = useAuth();
+  const navigate = useNavigate();
 
-  const [filterDate, setFilterDate] = useState<string>('')
-  const [showDatePicker, setShowDatePicker] = useState(false)
+  const [filterDate, setFilterDate] = useState('');
+  const [showDatePicker, setShowDatePicker] = useState(false);
 
-  const [wsState, setWsState] = useState<WorkspaceState>('loading')
-  const [lead, setLead] = useState<Lead | null>(null)
-  const [remainingCount, setRemainingCount] = useState(0)
+  const [wsState, setWsState] = useState<WorkspaceState>('loading');
+  const [lead, setLead] = useState<Lead | null>(null);
+  const [remainingCount, setRemainingCount] = useState(0);
 
-  const [outcome, setOutcome] = useState('')
-  const [notes, setNotes] = useState('')
-  const [callback, setCallback] = useState('')
-  const [saving, setSaving] = useState(false)
+  const [selectedOutcome, setSelectedOutcome] = useState('');
+  const [notes, setNotes] = useState('');
+  const [callback, setCallback] = useState('');
+  const [saving, setSaving] = useState(false);
 
-  const lockedLeadId = useRef<string | null>(null)
+  const lockedLeadId = useRef<string | null>(null);
 
   const fetchNextLead = useCallback(async (releasedId?: string) => {
-    if (!profile?.dealer_id || !profile?.id) return
+    if (!profile?.dealer_id || !profile?.id) return;
 
-    setWsState('loading')
-    setOutcome('')
-    setNotes('')
-    setCallback('')
+    setWsState('loading');
+    setSelectedOutcome('');
+    setNotes('');
+    setCallback('');
 
     if (releasedId) {
       await supabase
         .from('leads')
         .update({ locked_by: null, locked_at: null })
         .eq('id', releasedId)
-        .eq('locked_by', profile.id)
-      lockedLeadId.current = null
+        .eq('locked_by', profile.id);
+      lockedLeadId.current = null;
     }
 
     let query = supabase
@@ -82,47 +89,45 @@ export default function CallerWorkspace() {
       .select('*')
       .eq('dealer_id', profile.dealer_id)
       .eq('status', 'pending')
-      .is('locked_by', null)
+      .is('locked_by', null);
 
     if (filterDate) {
-      query = query.eq('next_service_date', filterDate)
+      query = query.eq('next_service_date', filterDate);
     }
 
     const { data } = await query
       .order('sort_order', { ascending: true })
       .limit(1)
-      .maybeSingle()
+      .maybeSingle();
 
     if (data) {
       await supabase
         .from('leads')
         .update({ locked_by: profile.id, locked_at: new Date().toISOString() })
-        .eq('id', data.id)
+        .eq('id', data.id);
 
-      lockedLeadId.current = data.id
-      setLead(data as Lead)
+      lockedLeadId.current = data.id;
+      setLead(data as Lead);
 
       let countQ = supabase
         .from('leads')
         .select('id', { count: 'exact', head: true })
         .eq('dealer_id', profile.dealer_id)
         .eq('status', 'pending')
-        .is('locked_by', null)
-      if (filterDate) countQ = countQ.eq('next_service_date', filterDate)
-      const { count } = await countQ
-      setRemainingCount(count ?? 0)
-      setWsState('has_lead')
+        .is('locked_by', null);
+      if (filterDate) countQ = countQ.eq('next_service_date', filterDate);
+      const { count } = await countQ;
+      setRemainingCount(count ?? 0);
+      setWsState('has_lead');
     } else {
-      setLead(null)
-      lockedLeadId.current = null
-      setRemainingCount(0)
-      setWsState(filterDate ? 'no_leads_for_date' : 'all_done')
+      setLead(null);
+      lockedLeadId.current = null;
+      setRemainingCount(0);
+      setWsState(filterDate ? 'no_leads_for_date' : 'all_done');
     }
-  }, [profile?.dealer_id, profile?.id, filterDate])
+  }, [profile?.dealer_id, profile?.id, filterDate]);
 
-  useEffect(() => {
-    fetchNextLead()
-  }, [filterDate])
+  useEffect(() => { fetchNextLead(); }, [fetchNextLead]);
 
   useEffect(() => {
     return () => {
@@ -131,47 +136,56 @@ export default function CallerWorkspace() {
           .from('leads')
           .update({ locked_by: null, locked_at: null })
           .eq('id', lockedLeadId.current)
-          .eq('locked_by', profile.id)
+          .eq('locked_by', profile.id);
       }
-    }
-  }, [profile?.id])
+    };
+  }, [profile?.id]);
 
   async function submitCall() {
-    if (!lead || !outcome || !profile?.id || !profile?.dealer_id) return
-    setSaving(true)
+    if (!lead || !selectedOutcome || !profile?.id || !profile?.dealer_id) return;
+    const match = OUTCOMES.find((o) => o.label === selectedOutcome);
+    if (!match) return;
 
-    await supabase.from('call_logs').insert({
-      lead_id: lead.id,
-      caller_id: profile.id,
-      dealer_id: profile.dealer_id,
-      action: outcome,
-      excuse_notes: notes || null,
-      follow_up_date: callback ? callback.split('T')[0] : null,
-    })
+    setSaving(true);
+    try {
+      const { error: logErr } = await supabase.from('call_logs').insert({
+        lead_id: lead.id,
+        caller_id: profile.id,
+        dealer_id: profile.dealer_id,
+        action: match.action,
+        excuse_notes: notes || null,
+        follow_up_date: callback ? callback.split('T')[0] : null,
+      });
+      if (logErr) throw logErr;
 
-    const newStatus =
-      outcome.toLowerCase().includes('completed') ? 'completed' :
-      outcome.toLowerCase().includes('not interested') ? 'not_interested' :
-      outcome.toLowerCase().includes('callback') ? 'callback' : 'called'
+      const { error: leadErr } = await supabase
+        .from('leads')
+        .update({ status: match.status, locked_by: null, locked_at: null })
+        .eq('id', lead.id);
+      if (leadErr) throw leadErr;
 
-    await supabase
-      .from('leads')
-      .update({ status: newStatus, locked_by: null, locked_at: null })
-      .eq('id', lead.id)
+      lockedLeadId.current = null;
+      toast.success('Call logged');
+      fetchNextLead(lead.id);
+    } catch (err: unknown) {
+      toast.error(err instanceof Error ? err.message : 'Failed to save call');
+      setSaving(false);
+    }
+  }
 
-    lockedLeadId.current = null
-    setSaving(false)
-    fetchNextLead(lead.id)
+  function skipLead() {
+    if (!lead) return;
+    fetchNextLead(lead.id);
   }
 
   const filterBar = (
-    <div className="bg-white border-b border-gray-200 px-4 py-2 flex items-center gap-2 flex-wrap sticky top-0 z-10">
+    <div className="bg-slate-900/80 backdrop-blur border-b border-white/[0.06] px-5 py-2.5 flex items-center gap-2 flex-wrap sticky top-0 z-10">
       <button
         onClick={() => setShowDatePicker((s) => !s)}
         className={`flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-lg border transition-colors ${
           filterDate
-            ? 'border-blue-500 bg-blue-50 text-blue-700 font-medium'
-            : 'border-gray-300 text-gray-600 hover:border-gray-400'
+            ? 'border-cyan-500/50 bg-cyan-500/10 text-cyan-400 font-medium'
+            : 'border-white/[0.08] text-slate-400 hover:border-white/[0.16] hover:text-slate-200'
         }`}
       >
         <Filter size={14} />
@@ -180,8 +194,8 @@ export default function CallerWorkspace() {
 
       {filterDate && (
         <button
-          onClick={() => { setFilterDate(''); setShowDatePicker(false) }}
-          className="p-1 text-gray-400 hover:text-gray-600 rounded"
+          onClick={() => { setFilterDate(''); setShowDatePicker(false); }}
+          className="p-1 text-slate-500 hover:text-slate-300 rounded transition-colors"
           title="Clear filter"
         >
           <X size={15} />
@@ -193,132 +207,162 @@ export default function CallerWorkspace() {
           type="date"
           value={filterDate}
           autoFocus
-          onChange={(e) => { setFilterDate(e.target.value); setShowDatePicker(false) }}
+          onChange={(e) => { setFilterDate(e.target.value); setShowDatePicker(false); }}
           onBlur={() => setShowDatePicker(false)}
-          className="border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+          className="bg-slate-800 border border-white/[0.08] rounded-lg px-3 py-1.5 text-sm text-white focus:outline-none focus:border-cyan-500/50 focus:ring-1 focus:ring-cyan-500/30"
         />
       )}
 
       {filterDate && wsState === 'has_lead' && (
-        <span className="ml-auto text-xs text-gray-500">
+        <span className="ml-auto text-xs text-slate-500">
           {remainingCount} lead{remainingCount !== 1 ? 's' : ''} remaining
         </span>
       )}
+
+      {!filterDate && (
+        <button
+          onClick={() => navigate('/caller/followups')}
+          className="ml-auto flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-lg border border-white/[0.08] text-slate-400 hover:border-white/[0.16] hover:text-slate-200 transition-colors"
+        >
+          <Calendar size={14} /> Follow-ups
+        </button>
+      )}
     </div>
-  )
+  );
 
   if (wsState === 'loading') {
     return (
-      <div className="min-h-[calc(100vh-56px)] flex flex-col">
+      <div className="min-h-[calc(100vh-56px)] bg-[#080C14] flex flex-col">
         {filterBar}
         <div className="flex-1 flex items-center justify-center">
-          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600" />
+          <div className="w-8 h-8 border-2 border-cyan-400/30 border-t-cyan-400 rounded-full animate-spin" />
         </div>
       </div>
-    )
+    );
   }
 
   if (wsState === 'no_leads_for_date') {
     return (
-      <div className="min-h-[calc(100vh-56px)] flex flex-col">
+      <div className="min-h-[calc(100vh-56px)] bg-[#080C14] flex flex-col">
         {filterBar}
-        <div className="flex-1 flex items-center justify-center bg-gray-50 py-16">
-          <div className="text-center p-8 max-w-sm">
-            <div className="w-16 h-16 bg-gray-100 rounded-full flex items-center justify-center mx-auto mb-4">
-              <Calendar size={28} className="text-gray-400" />
+        <motion.div
+          initial={{ opacity: 0, y: 16 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="flex-1 flex items-center justify-center py-16"
+        >
+          <div className="text-center max-w-sm px-4">
+            <div className="w-16 h-16 bg-slate-800/80 border border-white/[0.08] rounded-2xl flex items-center justify-center mx-auto mb-4">
+              <Calendar size={28} className="text-slate-500" />
             </div>
-            <h2 className="text-lg font-semibold text-gray-800">No leads for this date</h2>
-            <p className="text-gray-500 text-sm mt-2">
+            <h2 className="text-lg font-semibold text-white">No leads for this date</h2>
+            <p className="text-slate-500 text-sm mt-2">
               There are no pending leads with a next service date of{' '}
-              <span className="font-medium text-gray-700">{fmtDate(filterDate)}</span>.
+              <span className="font-medium text-slate-300">{fmtDate(filterDate)}</span>.
             </p>
-            <p className="text-gray-400 text-xs mt-1">Try selecting a different date.</p>
+            <p className="text-slate-600 text-xs mt-1">Try selecting a different date.</p>
             <div className="flex gap-2 justify-center mt-6">
               <button
-                onClick={() => { setFilterDate('') }}
-                className="px-4 py-2 border border-gray-300 text-gray-700 rounded-lg text-sm hover:bg-gray-50 transition-colors"
+                onClick={() => setFilterDate('')}
+                className="px-4 py-2 border border-white/[0.08] text-slate-300 rounded-lg text-sm hover:bg-white/[0.04] transition-colors"
               >
                 Clear Filter
               </button>
               <button
                 onClick={() => setShowDatePicker(true)}
-                className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors"
+                className="px-4 py-2 bg-gradient-to-r from-cyan-500 to-blue-600 text-white rounded-lg text-sm font-medium hover:shadow-lg hover:shadow-cyan-500/20 transition-all"
               >
                 Pick Another Date
               </button>
             </div>
           </div>
-        </div>
+        </motion.div>
       </div>
-    )
+    );
   }
 
   if (wsState === 'all_done') {
     return (
-      <div className="min-h-[calc(100vh-56px)] flex flex-col">
+      <div className="min-h-[calc(100vh-56px)] bg-[#080C14] flex flex-col">
         {filterBar}
-        <div className="flex-1 flex items-center justify-center bg-gray-50 py-16">
-          <div className="text-center p-8">
-            <div className="w-16 h-16 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-4">
-              <PhoneOff size={28} className="text-green-500" />
+        <motion.div
+          initial={{ opacity: 0, y: 16 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="flex-1 flex items-center justify-center py-16"
+        >
+          <div className="text-center">
+            <div className="w-16 h-16 bg-cyan-500/10 border border-cyan-500/20 rounded-2xl flex items-center justify-center mx-auto mb-4">
+              <PhoneOff size={28} className="text-cyan-400" />
             </div>
-            <h2 className="text-xl font-semibold text-gray-700">All caught up!</h2>
-            <p className="text-gray-500 mt-1 text-sm">All pending leads have been processed.</p>
+            <h2 className="text-xl font-semibold text-white">All caught up!</h2>
+            <p className="text-slate-500 mt-1 text-sm">All pending leads have been processed.</p>
             <button
               onClick={() => fetchNextLead()}
-              className="mt-5 px-5 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700"
+              className="mt-5 px-5 py-2.5 bg-gradient-to-r from-cyan-500 to-blue-600 text-white rounded-lg text-sm font-medium hover:shadow-lg hover:shadow-cyan-500/20 transition-all"
             >
               Refresh
             </button>
           </div>
-        </div>
+        </motion.div>
       </div>
-    )
+    );
   }
 
-  if (!lead) return null
+  if (!lead) return null;
 
-  // Filter extra_data: only show entries that have actual values
-  const extraEntries = Object.entries(lead.extra_data ?? {}).filter(([, v]) => hasValue(v))
+  const extraEntries = Object.entries(lead.extra_data ?? {}).filter(([, v]) => hasValue(v));
 
-  // Check each section for visibility — only show sections that have at least one non-blank field
-  const hasVehicleInfo = hasValue(lead.vehicle_number) || hasValue(lead.vehicle_model)
-  const hasServiceInfo = hasValue(lead.next_service_date) || hasValue(lead.next_service_type) || hasValue(lead.service_pending_date) || hasValue(lead.service_type)
-  const hasInsurance = hasValue(lead.insurance_expiry_date)
-  const hasContactInfo = hasValue(lead.address) || hasValue(lead.email)
-  const hasExtra = extraEntries.length > 0
+  const hasVehicleInfo = hasValue(lead.vehicle_number) || hasValue(lead.vehicle_model);
+  const hasServiceInfo =
+    hasValue(lead.next_service_date) || hasValue(lead.next_service_type) ||
+    hasValue(lead.service_pending_date) || hasValue(lead.service_type);
+  const hasInsurance = hasValue(lead.insurance_expiry_date);
+  const hasContactInfo = hasValue(lead.address) || hasValue(lead.email);
+  const hasExtra = extraEntries.length > 0;
 
   return (
-    <div className="min-h-[calc(100vh-56px)] bg-gray-50 flex flex-col">
+    <div className="min-h-[calc(100vh-56px)] bg-[#080C14] flex flex-col">
       {filterBar}
 
-      <div className="py-4 px-3 flex-1">
+      <div className="py-5 px-3 flex-1">
         <div className="max-w-xl mx-auto space-y-3">
 
           {filterDate && (
             <div className="text-center">
-              <span className="inline-flex items-center gap-1 text-xs bg-blue-100 text-blue-700 px-3 py-1 rounded-full font-medium">
+              <span className="inline-flex items-center gap-1 text-xs bg-cyan-500/10 border border-cyan-500/20 text-cyan-400 px-3 py-1 rounded-full font-medium">
                 {remainingCount} lead{remainingCount !== 1 ? 's' : ''} pending for {fmtDate(filterDate)}
               </span>
             </div>
           )}
 
-          {/* Customer card */}
-          <div className="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden">
-            <div className="bg-gradient-to-r from-blue-600 to-blue-700 px-5 py-4">
+          {/* Lead card */}
+          <motion.div
+            key={lead.id}
+            initial={{ opacity: 0, y: 12 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.25 }}
+            className="bg-slate-900/80 backdrop-blur border border-white/[0.08] rounded-2xl shadow-lg overflow-hidden"
+          >
+            {/* Header */}
+            <div className="bg-gradient-to-r from-cyan-500/10 to-blue-600/10 border-b border-white/[0.06] px-5 py-4">
               <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0">
                   <h2 className="text-white font-bold text-xl leading-tight truncate">
                     {hasValue(lead.customer_name) ? lead.customer_name : 'Unknown Customer'}
                   </h2>
                   {hasValue(lead.phone) && (
-                    <p className="text-blue-200 text-base mt-0.5 font-medium">{lead.phone}</p>
+                    <a
+                      href={`tel:${lead.phone}`}
+                      className="inline-flex items-center gap-1.5 text-cyan-400 hover:text-cyan-300 text-base mt-0.5 font-mono transition-colors"
+                    >
+                      <Phone className="w-3.5 h-3.5" />
+                      {lead.phone}
+                    </a>
                   )}
                 </div>
                 {hasValue(lead.phone) && (
                   <a
                     href={`tel:${lead.phone}`}
-                    className="shrink-0 bg-white text-blue-600 rounded-full p-3 hover:bg-blue-50 transition-colors shadow-md"
+                    className="shrink-0 bg-gradient-to-br from-cyan-500 to-blue-600 text-white rounded-full p-3 hover:shadow-lg hover:shadow-cyan-500/30 transition-all"
                   >
                     <Phone size={22} />
                   </a>
@@ -326,11 +370,11 @@ export default function CallerWorkspace() {
               </div>
             </div>
 
+            {/* Body — only non-blank sections render */}
             <div className="p-4 space-y-4">
-
               {hasVehicleInfo && (
                 <section>
-                  <p className="text-[11px] font-bold text-gray-400 uppercase tracking-widest mb-2">Vehicle Details</p>
+                  <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2">Vehicle Details</p>
                   <div className="grid grid-cols-2 gap-3">
                     <Field label="Registration No." value={lead.vehicle_number} />
                     <Field label="Model" value={lead.vehicle_model} />
@@ -339,8 +383,8 @@ export default function CallerWorkspace() {
               )}
 
               {hasServiceInfo && (
-                <section className="bg-amber-50 rounded-xl border border-amber-100 p-3">
-                  <p className="text-[11px] font-bold text-amber-700 uppercase tracking-widest mb-2">Service Info</p>
+                <section className="bg-amber-500/[0.08] border border-amber-500/20 rounded-xl p-3">
+                  <p className="text-[10px] font-bold text-amber-400/80 uppercase tracking-widest mb-2">Service Info</p>
                   <div className="grid grid-cols-2 gap-3">
                     <Field label="Next Service Date" value={fmtDate(lead.next_service_date)} />
                     <Field label="Next Service Type" value={lead.next_service_type} />
@@ -351,7 +395,7 @@ export default function CallerWorkspace() {
               )}
 
               {hasInsurance && (
-                <section className="bg-red-50 rounded-xl border border-red-100 p-3">
+                <section className="bg-red-500/[0.08] border border-red-500/20 rounded-xl p-3">
                   <Field label="Insurance Expiry" value={fmtDate(lead.insurance_expiry_date)} />
                 </section>
               )}
@@ -366,8 +410,8 @@ export default function CallerWorkspace() {
               )}
 
               {hasExtra && (
-                <section className="bg-gray-50 rounded-xl border border-gray-200 p-3">
-                  <p className="text-[11px] font-bold text-gray-400 uppercase tracking-widest mb-2">Additional Info</p>
+                <section className="bg-white/[0.03] border border-white/[0.06] rounded-xl p-3">
+                  <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2">Additional Info</p>
                   <div className="grid grid-cols-2 gap-3">
                     {extraEntries.map(([key, val]) => (
                       <Field key={key} label={key} value={String(val)} />
@@ -375,72 +419,89 @@ export default function CallerWorkspace() {
                   </div>
                 </section>
               )}
-
             </div>
-          </div>
+          </motion.div>
 
-          {/* Call outcome */}
-          <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-4 space-y-4">
-            <h3 className="font-semibold text-gray-900 flex items-center gap-2 text-sm">
-              <PhoneCall size={16} className="text-blue-600" /> Log Call Outcome
+          {/* Call outcome panel */}
+          <motion.div
+            initial={{ opacity: 0, y: 12 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.1, duration: 0.25 }}
+            className="bg-slate-900/80 backdrop-blur border border-white/[0.08] rounded-2xl p-4 space-y-4"
+          >
+            <h3 className="font-semibold text-white flex items-center gap-2 text-sm">
+              <PhoneCall size={16} className="text-cyan-400" /> Log Call Outcome
             </h3>
 
             <div className="grid grid-cols-2 gap-2">
               {OUTCOMES.map((o) => (
                 <button
-                  key={o}
-                  onClick={() => setOutcome(o)}
+                  key={o.label}
+                  onClick={() => setSelectedOutcome(o.label)}
                   className={`text-left text-sm px-3 py-2 rounded-xl border transition-all ${
-                    outcome === o
-                      ? 'border-blue-600 bg-blue-50 text-blue-700 font-semibold shadow-sm'
-                      : 'border-gray-200 hover:border-gray-300 text-gray-700'
+                    selectedOutcome === o.label
+                      ? 'border-cyan-500/60 bg-cyan-500/10 text-cyan-400 font-semibold'
+                      : 'border-white/[0.08] hover:border-white/[0.16] text-slate-300'
                   }`}
                 >
-                  {o}
+                  {o.label}
                 </button>
               ))}
             </div>
 
-            {outcome.toLowerCase().includes('callback') && (
-              <div>
-                <label className="block text-sm text-gray-600 mb-1 flex items-center gap-1">
-                  <Calendar size={14} /> Callback Date &amp; Time
+            {selectedOutcome === 'Callback Scheduled' && (
+              <motion.div
+                initial={{ opacity: 0, height: 0 }}
+                animate={{ opacity: 1, height: 'auto' }}
+              >
+                <label className="block text-sm text-slate-400 mb-1.5 flex items-center gap-1">
+                  <Calendar size={14} /> Callback Date
                 </label>
                 <input
-                  type="datetime-local"
-                  value={callback}
+                  type="date"
+                  value={callback ? callback.split('T')[0] : ''}
                   onChange={(e) => setCallback(e.target.value)}
-                  className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  className="w-full bg-slate-800/60 border border-white/[0.08] rounded-xl px-3 py-2 text-sm text-white focus:outline-none focus:border-cyan-500/50 focus:ring-1 focus:ring-cyan-500/30"
                 />
-              </div>
+              </motion.div>
             )}
 
             <div>
-              <label className="block text-sm text-gray-600 mb-1">Notes (optional)</label>
+              <label className="block text-sm text-slate-400 mb-1.5">Notes (optional)</label>
               <textarea
                 value={notes}
                 onChange={(e) => setNotes(e.target.value)}
                 rows={3}
                 placeholder="Add notes about the call..."
-                className="w-full border border-gray-300 rounded-xl px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none"
+                className="w-full bg-slate-800/60 border border-white/[0.08] rounded-xl px-3 py-2 text-sm text-white placeholder-slate-600 focus:outline-none focus:border-cyan-500/50 focus:ring-1 focus:ring-cyan-500/30 resize-none"
               />
             </div>
 
-            <button
-              onClick={submitCall}
-              disabled={!outcome || saving}
-              className="w-full bg-blue-600 text-white py-3 rounded-xl font-semibold hover:bg-blue-700 disabled:opacity-40 transition-colors flex items-center justify-center gap-2 text-sm"
-            >
-              {saving ? (
-                <><div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white" /> Saving...</>
-              ) : (
-                <><Save size={16} /> Save &amp; Next Lead</>
-              )}
-            </button>
-          </div>
+            <div className="flex gap-2">
+              <button
+                onClick={skipLead}
+                className="px-4 py-3 border border-white/[0.08] text-slate-400 rounded-xl text-sm font-medium hover:bg-white/[0.04] hover:text-slate-200 transition-colors"
+              >
+                Skip
+              </button>
+              <button
+                onClick={submitCall}
+                disabled={!selectedOutcome || saving}
+                className="flex-1 bg-gradient-to-r from-cyan-500 to-blue-600 text-white py-3 rounded-xl font-semibold hover:shadow-lg hover:shadow-cyan-500/25 disabled:opacity-40 disabled:cursor-not-allowed transition-all flex items-center justify-center gap-2 text-sm"
+              >
+                {saving ? (
+                  <><div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" /> Saving...</>
+                ) : (
+                  <><Save size={16} /> Save &amp; Next Lead</>
+                )}
+              </button>
+            </div>
+          </motion.div>
 
         </div>
       </div>
     </div>
-  )
+  );
 }
+
+
