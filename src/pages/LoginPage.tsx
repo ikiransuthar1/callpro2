@@ -1,11 +1,20 @@
 import { useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { Phone, Eye, EyeOff, Zap } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import toast from 'react-hot-toast';
+import type { UserRole } from '../types/database';
+
+const HOME_PATH: Record<UserRole, string> = {
+  founder: '/founder',
+  dealer: '/dealer',
+  caller: '/caller',
+};
 
 export default function LoginPage() {
-  const { signIn } = useAuth();
+  const { signIn, profile } = useAuth();
+  const navigate = useNavigate();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [showPass, setShowPass] = useState(false);
@@ -18,8 +27,20 @@ export default function LoginPage() {
     const { error } = await signIn(email, password);
     if (error) {
       toast.error(error.message || 'Invalid credentials');
+      setLoading(false);
+      return;
     }
-    setLoading(false);
+    // On success, do NOT reset loading — RoleRouter will take over once the
+    // profile loads. But as a fallback, redirect after a short tick if the
+    // profile is already available (e.g. session reused).
+    if (profile) {
+      navigate(HOME_PATH[profile.role], { replace: true });
+    }
+    // If profile is still loading, the <RoleRouter /> at "/" handles the
+    // redirect once auth state settles. We navigate there to trigger it.
+    else {
+      navigate('/', { replace: true });
+    }
   };
 
   return (

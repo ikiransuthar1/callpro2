@@ -2,13 +2,15 @@ import { useState, useRef, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { read, utils } from 'xlsx';
 import {
-  Upload, FileText, CheckCircle, XCircle, RefreshCw,
+  Upload, FileText, CheckCircle, XCircle, RefreshCw, Trash2,
+  AlertTriangle, Loader2,
 } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { supabase } from '../../lib/supabase';
 import { useAuth } from '../../contexts/AuthContext';
 import { autoDetectMapping, buildLeadFromRow } from '../../lib/excelUtils';
 import { useLeadFiles } from '../../hooks/useLeadFiles';
+import type { LeadFile } from '../../types/database';
 
 interface ParsedRow { [key: string]: unknown }
 type Step = 'idle' | 'uploading' | 'done';
@@ -29,6 +31,10 @@ export default function LeadFiles() {
   const { files, refresh } = useLeadFiles();
   const [state, setState] = useState<State>(INIT);
   const fileRef = useRef<HTMLInputElement>(null);
+
+  // Delete batch confirmation
+  const [fileToDelete, setFileToDelete] = useState<LeadFile | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   const handleFile = useCallback(async (file: File) => {
     if (!profile?.dealer_id || !profile?.id) {
@@ -139,6 +145,31 @@ export default function LeadFiles() {
     if (fileRef.current) fileRef.current.value = '';
   }
 
+  async function confirmDeleteFile() {
+    if (!fileToDelete) return;
+    setDeleting(true);
+    try {
+      // Deleting the lead_files row automatically cascades to all leads in
+      // that batch (via leads_file_id_fkey ON DELETE CASCADE), and each
+      // lead's call_logs cascade in turn (call_logs_lead_id_fkey ON DELETE
+      // CASCADE). One delete cleans the whole batch.
+      const { error } = await supabase
+        .from('lead_files')
+        .delete()
+        .eq('id', fileToDelete.id);
+
+      if (error) throw error;
+
+      toast.success(`"${fileToDelete.file_name}" and all its leads were deleted.`);
+      setFileToDelete(null);
+      refresh();
+    } catch (err: unknown) {
+      toast.error(err instanceof Error ? err.message : 'Failed to delete batch');
+    } finally {
+      setDeleting(false);
+    }
+  }
+
   return (
     <div className="min-h-screen bg-[#080C14] p-8">
       <motion.div
@@ -240,7 +271,7 @@ export default function LeadFiles() {
         {/* Uploaded files list */}
         <div className="space-y-3">
           <div className="flex items-center justify-between">
-            <h2 className="text-lg font-semibold text-white">Uploaded Files</h2>
+            <h2 className="text-lg font-semibold text-white">Uploaded Batches</h2>
             <button
               onClick={refresh}
               className="flex items-center gap-1.5 text-xs text-slate-500 hover:text-cyan-400 transition-colors"
@@ -248,7 +279,9 @@ export default function LeadFiles() {
               <RefreshCw size={14} /> Refresh
             </button>
           </div>
-          {files.length === 0 && <p className="text-slate-500 text-sm">No files uploaded yet.</p>}
+          {files.length === 0 && (
+            <p className="text-slate-500 text-sm">No files uploaded yet.</p>
+          )}
           {files.map((f) => (
             <motion.div
               key={f.id}
@@ -265,10 +298,69 @@ export default function LeadFiles() {
                   {f.total_records} rows · {new Date(f.created_at).toLocaleDateString()}
                 </p>
               </div>
+              <button
+                onClick={() => setFileToDelete(f)}
+                className="shrink-0 w-9 h-9 flex items-center justify-center rounded-lg text-slate-400 hover:text-red-400 hover:bg-red-500/10 transition-colors"
+                title="Delete this batch and all its leads"
+              >
+                <Trash2 size={16} />
+              </button>
             </motion.div>
           ))}
         </div>
       </div>
+
+      {/* Delete Batch Confirmation Modal */}
+      <AnimatePresence>
+        {fileToDelete && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4"
+            onClick={(e) => !deleting && e.target === e.currentTarget && setFileToDelete(null)}
+          >
+            <motion.div
+              initial={{ opacity: 0, scale: 0.96, y: 16 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.96 }}
+              className="bg-slate-900 border border-white/[0.08] rounded-2xl w-full max-w-sm shadow-2xl p-6"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="w-12 h-12 rounded-2xl bg-red-500/10 border border-red-500/20 flex items-center justify-center mx-auto mb-4">
+                <AlertTriangle className="w-6 h-6 text-red-400" />
+              </div>
+              <h2 className="text-base font-semibold text-white text-center">Delete This Batch?</h2>
+              <p className="text-slate-400 text-sm text-center mt-2">
+                This will permanently delete{' '}
+                <span className="text-white font-medium">{fileToDelete.file_name}</span>{' '}
+                and <span className="text-red-400 font-medium">all {fileToDelete.total_records} leads</span>{' '}
+                imported from it, along with any call history recorded for those leads. This action cannot be undone.
+              </p>
+              <div className="flex items-center gap-3 mt-6">
+                <button
+                  onClick={() => setFileToDelete(null)}
+                  disabled={deleting}
+                  className="flex-1 px-4 py-2.5 text-sm text-slate-400 hover:text-white border border-white/[0.08] rounded-xl hover:bg-white/[0.04] transition-all disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={confirmDeleteFile}
+                  disabled={deleting}
+                  className="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 text-sm font-medium bg-red-500/80 hover:bg-red-500 text-white rounded-xl transition-all disabled:opacity-60"
+                >
+                  {deleting ? (
+                    <><Loader2 size={14} className="animate-spin" /> Deleting…</>
+                  ) : (
+                    <><Trash2 size={14} /> Delete Batch</>
+                  )}
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }

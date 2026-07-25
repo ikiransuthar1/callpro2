@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
-  User, Plus, X, MoreVertical, Trash2, KeyRound, Eye, EyeOff, RefreshCw,
+  User, Plus, X, MoreVertical, KeyRound, Eye, EyeOff, RefreshCw,
+  Trash2, AlertTriangle, Loader2,
 } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { supabase } from '../../lib/supabase';
@@ -19,6 +20,10 @@ export default function CallerManagement() {
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
+
+  // Delete confirmation modal
+  const [callerToDelete, setCallerToDelete] = useState<Profile | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState(generatePassword());
@@ -80,6 +85,49 @@ export default function CallerManagement() {
       toast.success(`Password reset email sent to ${callerEmail}`);
     } catch (err: unknown) {
       toast.error(err instanceof Error ? err.message : 'Reset failed');
+    }
+  }
+
+  async function confirmDeleteCaller() {
+    if (!callerToDelete) return;
+    const callerId = callerToDelete.id;
+    setDeleting(true);
+    try {
+      // 1. Reassign any pending/incomplete leads locked by this caller back to
+      //    unassigned so other callers can pick them up. Reset the lock too.
+      const { error: reassignErr } = await supabase
+        .from('leads')
+        .update({ assigned_caller_id: null, locked_by: null, locked_at: null })
+        .eq('locked_by', callerId)
+        .in('status', ['pending', 'called', 'follow_up']);
+
+      if (reassignErr) throw reassignErr;
+
+      // 2. Also clear assigned_caller_id for any leads explicitly assigned
+      //    to this caller (regardless of status), so no dangling references remain.
+      await supabase
+        .from('leads')
+        .update({ assigned_caller_id: null })
+        .eq('assigned_caller_id', callerId);
+
+      // 3. Delete the caller's profile row. Call history (call_logs) is
+      //    retained for analytics — it references caller_id but that's just a
+      //    UUID, no FK constraint, so the rows stay valid for reporting.
+      const { error: deleteErr } = await supabase
+        .from('profiles')
+        .delete()
+        .eq('id', callerId);
+
+      if (deleteErr) throw deleteErr;
+
+      toast.success(`Caller "${callerToDelete.full_name ?? callerToDelete.email}" removed. Their pending leads have been unassigned.`);
+      setCallerToDelete(null);
+      setOpenMenuId(null);
+      load();
+    } catch (err: unknown) {
+      toast.error(err instanceof Error ? err.message : 'Failed to remove caller');
+    } finally {
+      setDeleting(false);
     }
   }
 
@@ -149,13 +197,20 @@ export default function CallerManagement() {
                     initial={{ opacity: 0, scale: 0.95, y: -4 }}
                     animate={{ opacity: 1, scale: 1, y: 0 }}
                     exit={{ opacity: 0, scale: 0.95, y: -4 }}
-                    className="absolute right-0 top-9 z-20 w-44 bg-slate-800 border border-white/[0.08] rounded-xl shadow-2xl overflow-hidden"
+                    className="absolute right-0 top-9 z-20 w-48 bg-slate-800 border border-white/[0.08] rounded-xl shadow-2xl overflow-hidden"
                   >
                     <button
                       onClick={() => resetPassword(c.email ?? '')}
                       className="w-full flex items-center gap-2.5 px-4 py-2.5 text-sm text-slate-300 hover:bg-white/[0.06] hover:text-white transition-colors text-left"
                     >
                       <KeyRound size={14} className="text-blue-400" /> Reset Password
+                    </button>
+                    <div className="border-t border-white/[0.06]" />
+                    <button
+                      onClick={() => { setCallerToDelete(c); setOpenMenuId(null); }}
+                      className="w-full flex items-center gap-2.5 px-4 py-2.5 text-sm text-red-400 hover:bg-red-500/10 transition-colors text-left"
+                    >
+                      <Trash2 size={14} /> Remove Caller
                     </button>
                   </motion.div>
                 )}
@@ -231,6 +286,59 @@ export default function CallerManagement() {
                   </button>
                 </div>
               </form>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Delete Caller Confirmation Modal */}
+      <AnimatePresence>
+        {callerToDelete && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4"
+            onClick={(e) => !deleting && e.target === e.currentTarget && setCallerToDelete(null)}
+          >
+            <motion.div
+              initial={{ opacity: 0, scale: 0.96, y: 16 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.96 }}
+              className="bg-slate-900 border border-white/[0.08] rounded-2xl w-full max-w-sm shadow-2xl p-6"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="w-12 h-12 rounded-2xl bg-red-500/10 border border-red-500/20 flex items-center justify-center mx-auto mb-4">
+                <AlertTriangle className="w-6 h-6 text-red-400" />
+              </div>
+              <h2 className="text-base font-semibold text-white text-center">Remove Caller?</h2>
+              <p className="text-slate-400 text-sm text-center mt-2">
+                Are you sure you want to remove{' '}
+                <span className="text-white font-medium">
+                  {callerToDelete.full_name ?? callerToDelete.email}
+                </span>
+                ? Any pending or follow-up leads currently assigned to them will be set back to unassigned so other callers can pick them up. Their past call history is kept for analytics.
+              </p>
+              <div className="flex items-center gap-3 mt-6">
+                <button
+                  onClick={() => setCallerToDelete(null)}
+                  disabled={deleting}
+                  className="flex-1 px-4 py-2.5 text-sm text-slate-400 hover:text-white border border-white/[0.08] rounded-xl hover:bg-white/[0.04] transition-all disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={confirmDeleteCaller}
+                  disabled={deleting}
+                  className="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 text-sm font-medium bg-red-500/80 hover:bg-red-500 text-white rounded-xl transition-all disabled:opacity-60"
+                >
+                  {deleting ? (
+                    <><Loader2 size={14} className="animate-spin" /> Removing…</>
+                  ) : (
+                    <><Trash2 size={14} /> Remove</>
+                  )}
+                </button>
+              </div>
             </motion.div>
           </motion.div>
         )}
