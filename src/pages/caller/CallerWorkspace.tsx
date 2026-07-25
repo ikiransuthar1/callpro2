@@ -21,8 +21,21 @@ const OUTCOMES: { label: string; action: CallAction; status: LeadStatus }[] = [
   { label: 'Completed', action: 'completed', status: 'completed' },
 ];
 
-// Keys we pull out of extra_data and show in Service Info — suppress from Additional Info.
+// Keys we pull out of extra_data and promote into the header / service info.
+// Suppress these from the Additional Info grid to avoid duplication.
 const SERVICE_EXTRA_KEYS = new Set(['next_service_date', 'next_service_type']);
+// Common column names for phone number in uploaded data.
+const PHONE_EXTRA_KEYS = ['contact number', 'phone', 'mobile', 'mobile number', 'contact no', 'phone number', 'mob no', 'mob', 'contact', 'phone no'];
+
+/** Resolve the best available phone number for a lead. Falls back to extra_data. */
+function resolvePhone(lead: Lead): string | null {
+  if (lead.phone?.trim()) return lead.phone.trim();
+  if (!lead.extra_data) return null;
+  for (const [k, v] of Object.entries(lead.extra_data)) {
+    if (PHONE_EXTRA_KEYS.includes(k.toLowerCase().trim()) && v) return String(v).trim();
+  }
+  return null;
+}
 
 function fmtDate(d: string | null | undefined) {
   if (!d) return null;
@@ -211,16 +224,17 @@ export default function CallerWorkspace() {
   }
 
   function buildWhatsAppUrl() {
-    if (!lead?.phone) return '#';
-    const phone = lead.phone.replace(/\D/g, '');
-    const name = lead.customer_name ?? 'Customer';
-    const model = lead.vehicle_model ?? 'Vehicle';
-    const nst = nextServiceType ?? '';
-    const nsd = nextServiceDate ? fmtDate(nextServiceDate) : '';
+    const phone = resolvePhone(lead ?? ({} as Lead));
+    if (!phone) return '#';
+    const clean = phone.replace(/\D/g, '');
+    const name = lead?.customer_name ?? 'Customer';
+    const model = lead?.vehicle_model ?? 'Vehicle';
+    const nst = getNextServiceType(lead ?? ({} as Lead)) ?? '';
+    const nsd = getNextServiceDate(lead ?? ({} as Lead));
+    const nsdFmt = nsd ? fmtDate(nsd) : '';
     const dname = dealer?.company_name ?? '';
-    const msg =
-      `Hye,\nDear, ${name}\nApki Honda ${model} Ki ${nst} ${nsd} Ko\nSchedulel He to Kripya Karke ${dname} Par Akke Service Karaye.\n${dname}`;
-    return `https://wa.me/${phone}?text=${encodeURIComponent(msg)}`;
+    const msg = `Hye,\nDear, ${name}\nApki Honda ${model} Ki ${nst} ${nsdFmt} Ko\nSchedulel He to Kripya Karke ${dname} Par Akke Service Karaye.\n${dname}`;
+    return `https://wa.me/${clean}?text=${encodeURIComponent(msg)}`;
   }
 
   function skipLead() {
@@ -390,12 +404,14 @@ export default function CallerWorkspace() {
 
   const nextServiceDate = getNextServiceDate(lead);
   const nextServiceType = getNextServiceType(lead);
+  const displayPhone = resolvePhone(lead);
   const whatsappUrl = buildWhatsAppUrl();
 
-  // Additional info: all extra_data keys EXCEPT the ones shown in Service Info.
-  const extraEntries = Object.entries(lead.extra_data ?? {}).filter(
-    ([k]) => !SERVICE_EXTRA_KEYS.has(k.toLowerCase())
-  );
+  // Additional info: all extra_data keys EXCEPT service keys and phone keys already shown in header.
+  const extraEntries = Object.entries(lead.extra_data ?? {}).filter(([k]) => {
+    const lower = k.toLowerCase().trim();
+    return !SERVICE_EXTRA_KEYS.has(lower) && !PHONE_EXTRA_KEYS.includes(lower);
+  });
 
   return (
     <div className="min-h-[calc(100vh-56px)] bg-[#080C14] flex flex-col">
@@ -422,16 +438,16 @@ export default function CallerWorkspace() {
               <h2 className="text-white font-extrabold text-2xl leading-tight uppercase tracking-wide">
                 {lead.customer_name || 'Unknown Customer'}
               </h2>
-              {lead.phone && (
+              {displayPhone && (
                 <a
-                  href={`tel:${lead.phone}`}
-                  className="inline-flex items-center gap-2.5 mt-3 group"
+                  href={`tel:${displayPhone}`}
+                  className="inline-flex items-center gap-3 mt-3 group"
                 >
-                  <span className="w-9 h-9 rounded-full bg-red-500 flex items-center justify-center shrink-0 group-hover:bg-red-400 transition-colors shadow-lg shadow-red-500/30">
-                    <Phone className="w-4 h-4 text-white" fill="white" />
+                  <span className="w-10 h-10 rounded-full bg-red-500 flex items-center justify-center shrink-0 group-hover:bg-red-400 transition-colors shadow-lg shadow-red-500/40">
+                    <Phone className="w-5 h-5 text-white" fill="white" />
                   </span>
-                  <span className="text-2xl font-extrabold font-mono tracking-widest text-white group-hover:text-cyan-300 transition-colors">
-                    {lead.phone}
+                  <span className="text-3xl font-extrabold font-mono tracking-widest text-white group-hover:text-cyan-300 transition-colors">
+                    {displayPhone}
                   </span>
                 </a>
               )}
@@ -497,27 +513,25 @@ export default function CallerWorkspace() {
                 </div>
               )}
 
-              {/* Call & WhatsApp action buttons */}
-              <div className="grid grid-cols-2 gap-3 pt-1">
-                {lead.phone && (
+              {/* Call & WhatsApp action buttons — always shown when a phone is available */}
+              {displayPhone && (
+                <div className="grid grid-cols-2 gap-3 pt-1">
                   <a
-                    href={`tel:${lead.phone}`}
-                    className="flex items-center justify-center gap-2 bg-emerald-500 hover:bg-emerald-400 active:scale-95 text-white font-bold py-3 rounded-xl text-base transition-all hover:shadow-lg hover:shadow-emerald-500/30"
+                    href={`tel:${displayPhone}`}
+                    className="flex items-center justify-center gap-2 bg-emerald-500 hover:bg-emerald-400 active:scale-95 text-white font-bold py-3.5 rounded-xl text-base transition-all hover:shadow-lg hover:shadow-emerald-500/30"
                   >
                     <Phone size={18} fill="white" /> Call Now
                   </a>
-                )}
-                {lead.phone && (
                   <a
                     href={whatsappUrl}
                     target="_blank"
                     rel="noreferrer"
-                    className="flex items-center justify-center gap-2 bg-[#25D366] hover:bg-[#1fb855] active:scale-95 text-white font-bold py-3 rounded-xl text-base transition-all hover:shadow-lg hover:shadow-green-500/30"
+                    className="flex items-center justify-center gap-2 bg-[#25D366] hover:bg-[#20b955] active:scale-95 text-white font-bold py-3.5 rounded-xl text-base transition-all hover:shadow-lg hover:shadow-green-500/30"
                   >
                     <MessageCircle size={18} fill="white" stroke="none" /> WhatsApp
                   </a>
-                )}
-              </div>
+                </div>
+              )}
             </div>
           </div>
 
