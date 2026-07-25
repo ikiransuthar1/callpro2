@@ -18,16 +18,29 @@ import type { Profile, CallAction } from '../../types/database';
 import toast from 'react-hot-toast';
 
 /* ─── Types ─────────────────────────────────────────────────────────────── */
+interface LeadRow {
+  id: string;
+  customer_name: string | null;
+  phone: string | null;
+  vehicle_number: string | null;
+  vehicle_model: string | null;
+  service_type: string | null;
+  service_pending_date: string | null;
+  next_service_date: string | null;
+  next_service_type: string | null;
+  insurance_expiry_date: string | null;
+  address: string | null;
+  email: string | null;
+  extra_data: Record<string, unknown> | null;
+}
+
 interface EnrichedLog {
   id: string;
   caller_id: string;
   caller_name: string;
   caller_email: string;
   lead_id: string;
-  customer_name: string | null;
-  phone: string | null;
-  vehicle_model: string | null;
-  service_type: string | null;
+  lead: LeadRow | null;
   action: CallAction;
   excuse_notes: string | null;
   follow_up_date: string | null;
@@ -62,6 +75,44 @@ const cardVariants = {
   }),
 };
 
+/** Convert a YYYY-MM-DD date input into an inclusive end-of-day UTC timestamp. */
+function endOfDayUtc(dateStr: string): string {
+  // dateStr is a local calendar date from an <input type="date">. Treat it as
+  // the end of that calendar day in UTC so we capture every call made that day
+  // regardless of the server's timezone. 23:59:59.999Z covers the full day.
+  return `${dateStr}T23:59:59.999Z`;
+}
+
+/** Convert a YYYY-MM-DD date input into a start-of-day UTC timestamp. */
+function startOfDayUtc(dateStr: string): string {
+  return `${dateStr}T00:00:00.000Z`;
+}
+
+const ACTION_LABELS: Record<CallAction, string> = {
+  interested: 'Interested',
+  not_interested: 'Not Interested',
+  call_later: 'Call Later',
+  no_answer: 'No Answer',
+  busy: 'Busy',
+  wrong_number: 'Wrong Number',
+  completed: 'Completed',
+};
+
+/** Standard column labels for export, in the order they were uploaded. */
+const STANDARD_EXPORT_FIELDS: { key: keyof LeadRow; label: string }[] = [
+  { key: 'customer_name', label: 'Customer Name' },
+  { key: 'phone', label: 'Phone' },
+  { key: 'vehicle_number', label: 'Vehicle Number' },
+  { key: 'vehicle_model', label: 'Vehicle Model' },
+  { key: 'service_type', label: 'Service Type' },
+  { key: 'service_pending_date', label: 'Service Pending Date' },
+  { key: 'next_service_date', label: 'Next Service Date' },
+  { key: 'next_service_type', label: 'Next Service Type' },
+  { key: 'insurance_expiry_date', label: 'Insurance Expiry Date' },
+  { key: 'address', label: 'Address' },
+  { key: 'email', label: 'Email' },
+];
+
 export default function DealerAnalytics() {
   const { profile } = useAuth();
   const dealerId = profile?.dealer_id ?? profile?.id;
@@ -86,9 +137,6 @@ export default function DealerAnalytics() {
     if (!dealerId) return;
     setLoading(true);
     try {
-      // Fetch callers and logs in parallel.
-      // NOTE: call_logs.caller_id references auth.users (no FK to profiles),
-      // so we cannot use Supabase auto-join. We fetch profiles separately and merge.
       const [callersRes, logsRes] = await Promise.all([
         supabase
           .from('profiles')
@@ -98,11 +146,13 @@ export default function DealerAnalytics() {
           .from('call_logs')
           .select(
             `id, caller_id, lead_id, action, excuse_notes, follow_up_date, called_at,
-             leads ( id, customer_name, phone, vehicle_model, service_type )`
+             leads ( id, customer_name, phone, vehicle_number, vehicle_model, service_type,
+                     service_pending_date, next_service_date, next_service_type,
+                     insurance_expiry_date, address, email, extra_data )`
           )
           .eq('dealer_id', dealerId)
-          .gte('called_at', `${dateFrom}T00:00:00`)
-          .lte('called_at', `${dateTo}T23:59:59`)
+          .gte('called_at', startOfDayUtc(dateFrom))
+          .lte('called_at', endOfDayUtc(dateTo))
           .order('called_at', { ascending: false }),
       ]);
 
@@ -112,22 +162,18 @@ export default function DealerAnalytics() {
       const profileList = (callersRes.data ?? []) as Profile[];
       setCallers(profileList.filter(p => p.role === 'caller'));
 
-      // Build caller_id → profile map for fast lookup
       const callerMap = new Map(profileList.map(p => [p.id, p]));
 
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const enriched: EnrichedLog[] = (logsRes.data ?? []).map((row: any) => {
         const callerProfile = callerMap.get(row.caller_id);
+        const lead = (row.leads && !Array.isArray(row.leads) ? row.leads : null) as LeadRow | null;
         return {
           id: row.id,
           caller_id: row.caller_id,
           caller_name: callerProfile?.full_name ?? callerProfile?.email ?? 'Unknown',
           caller_email: callerProfile?.email ?? '',
           lead_id: row.lead_id,
-          customer_name: row.leads?.customer_name ?? null,
-          phone: row.leads?.phone ?? null,
-          vehicle_model: row.leads?.vehicle_model ?? null,
-          service_type: row.leads?.service_type ?? null,
+          lead,
           action: row.action as CallAction,
           excuse_notes: row.excuse_notes,
           follow_up_date: row.follow_up_date,
@@ -151,12 +197,17 @@ export default function DealerAnalytics() {
   /* ─── Derived / filtered data ───────────────────────────────────────── */
   const filteredLogs = logs.filter((log) => {
     if (callerFilter !== 'all' && log.caller_id !== callerFilter) return false;
-    if (serviceFilter !== 'all' && log.service_type !== serviceFilter) return false;
+    const svc = log.lead?.service_type ?? log.lead?.next_service_type ?? null;
+    if (serviceFilter !== 'all' && svc !== serviceFilter) return false;
     return true;
   });
 
   const serviceTypes = Array.from(
-    new Set(logs.map((l) => l.service_type).filter(Boolean) as string[])
+    new Set(
+      logs
+        .map((l) => l.lead?.service_type ?? l.lead?.next_service_type ?? null)
+        .filter(Boolean) as string[]
+    )
   ).sort();
 
   function computeStats(rows: EnrichedLog[]): SummaryStats {
@@ -185,37 +236,65 @@ export default function DealerAnalytics() {
     };
   }).filter((s) => s.total > 0).sort((a, b) => b.total - a.total);
 
-  /* ─── Excel Export ──────────────────────────────────────────────────── */
+  /* ─── Comprehensive Excel Export ─────────────────────────────────────── */
   async function handleExport() {
+    if (filteredLogs.length === 0) return;
     setExporting(true);
     try {
-      const exportData = filteredLogs.map((log) => ({
-        'Called At': new Date(log.called_at).toLocaleString(),
-        'Caller Name': log.caller_name,
-        'Caller Email': log.caller_email,
-        'Customer Name': log.customer_name ?? '',
-        Phone: log.phone ?? '',
-        'Vehicle Model': log.vehicle_model ?? '',
-        'Service Type': log.service_type ?? '',
-        Action: log.action.replace(/_/g, ' ').toUpperCase(),
-        Notes: log.excuse_notes ?? '',
-        'Follow-up Date': log.follow_up_date ?? '',
-      }));
+      // Collect every metadata key across all rows so the export has a
+      // consistent column set (union of all extra_data keys).
+      const metadataKeys = new Set<string>();
+      for (const log of filteredLogs) {
+        const extra = log.lead?.extra_data;
+        if (extra && typeof extra === 'object') {
+          for (const key of Object.keys(extra)) metadataKeys.add(key);
+        }
+      }
+      const sortedMetadataKeys = Array.from(metadataKeys).sort();
+
+      const exportData = filteredLogs.map((log) => {
+        const row: Record<string, string> = {};
+
+        // 1. Standard columns from the original upload
+        for (const field of STANDARD_EXPORT_FIELDS) {
+          const val = log.lead?.[field.key];
+          row[field.label] = val === null || val === undefined ? '' : String(val);
+        }
+
+        // 2. All metadata (JSONB extra_data) columns
+        const extra = log.lead?.extra_data;
+        for (const key of sortedMetadataKeys) {
+          const val = extra && typeof extra === 'object' ? (extra as Record<string, unknown>)[key] : undefined;
+          row[key] = val === null || val === undefined ? '' : String(val);
+        }
+
+        // 3. Appended calling data
+        row['Caller Name'] = log.caller_name;
+        row['Call Date'] = new Date(log.called_at).toLocaleString();
+        row['Call Excuse / Disposition'] = ACTION_LABELS[log.action] ?? log.action;
+        if (log.excuse_notes) row['Call Notes'] = log.excuse_notes;
+        if (log.follow_up_date) row['Follow-up Date'] = log.follow_up_date;
+
+        return row;
+      });
 
       const ws = XLSX.utils.json_to_sheet(exportData);
       const wb = XLSX.utils.book_new();
-      XLSX.utils.book_append_sheet(wb, ws, 'Call Logs');
+      XLSX.utils.book_append_sheet(wb, ws, 'Done Calls');
 
-      // Auto-size columns
-      const colWidths = Object.keys(exportData[0] ?? {}).map((key) => ({
-        wch: Math.max(key.length, 14),
+      // Auto-size columns based on content width
+      const allKeys = [...STANDARD_EXPORT_FIELDS.map(f => f.label), ...sortedMetadataKeys, 'Caller Name', 'Call Date', 'Call Excuse / Disposition'];
+      ws['!cols'] = allKeys.map((key) => ({
+        wch: Math.max(
+          key.length + 2,
+          Math.min(40, (exportData[0]?.[key] ?? '').length + 2),
+        ),
       }));
-      ws['!cols'] = colWidths;
 
       const now = new Date();
       const dateStr = now.toISOString().split('T')[0];
-      XLSX.writeFile(wb, `call_report_${dateStr}.xlsx`);
-      toast.success('Report downloaded');
+      XLSX.writeFile(wb, `done_calls_${dateStr}.xlsx`);
+      toast.success(`Exported ${exportData.length} call records`);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Export failed';
       toast.error(msg);
@@ -226,41 +305,11 @@ export default function DealerAnalytics() {
 
   /* ─── Summary card config ───────────────────────────────────────────── */
   const summaryCards = [
-    {
-      label: 'Total Calls',
-      value: summary.total,
-      icon: Phone,
-      color: 'text-cyan-400',
-      bg: 'bg-cyan-400/10',
-    },
-    {
-      label: 'Interested',
-      value: summary.interested,
-      icon: ThumbsUp,
-      color: 'text-emerald-400',
-      bg: 'bg-emerald-400/10',
-    },
-    {
-      label: 'Not Interested',
-      value: summary.notInterested,
-      icon: ThumbsDown,
-      color: 'text-red-400',
-      bg: 'bg-red-400/10',
-    },
-    {
-      label: 'Call Later',
-      value: summary.callLater,
-      icon: Clock,
-      color: 'text-amber-400',
-      bg: 'bg-amber-400/10',
-    },
-    {
-      label: 'Follow-ups',
-      value: summary.followUp,
-      icon: CalendarClock,
-      color: 'text-blue-400',
-      bg: 'bg-blue-400/10',
-    },
+    { label: 'Total Calls', value: summary.total, icon: Phone, color: 'text-cyan-400', bg: 'bg-cyan-400/10' },
+    { label: 'Interested', value: summary.interested, icon: ThumbsUp, color: 'text-emerald-400', bg: 'bg-emerald-400/10' },
+    { label: 'Not Interested', value: summary.notInterested, icon: ThumbsDown, color: 'text-red-400', bg: 'bg-red-400/10' },
+    { label: 'Call Later', value: summary.callLater, icon: Clock, color: 'text-amber-400', bg: 'bg-amber-400/10' },
+    { label: 'Follow-ups', value: summary.followUp, icon: CalendarClock, color: 'text-blue-400', bg: 'bg-blue-400/10' },
   ];
 
   /* ─── Render ────────────────────────────────────────────────────────── */
@@ -285,7 +334,7 @@ export default function DealerAnalytics() {
           className="flex items-center gap-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed text-white font-semibold px-5 py-2.5 rounded-xl text-sm transition-colors"
         >
           <Download className="w-4 h-4" />
-          {exporting ? 'Exporting…' : 'Export Excel'}
+          {exporting ? 'Exporting…' : 'Export Done Calls'}
         </button>
       </motion.div>
 
@@ -301,11 +350,8 @@ export default function DealerAnalytics() {
           <span className="text-slate-300 text-sm font-medium">Filters</span>
         </div>
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-          {/* Date From */}
           <div>
-            <label className="block text-slate-500 text-xs mb-1.5 uppercase tracking-wide">
-              From
-            </label>
+            <label className="block text-slate-500 text-xs mb-1.5 uppercase tracking-wide">From</label>
             <input
               type="date"
               value={dateFrom}
@@ -313,11 +359,8 @@ export default function DealerAnalytics() {
               className="w-full bg-slate-800 border border-white/[0.08] rounded-xl px-4 py-2.5 text-white text-sm focus:outline-none focus:border-cyan-500/60 focus:ring-1 focus:ring-cyan-500/40 transition"
             />
           </div>
-          {/* Date To */}
           <div>
-            <label className="block text-slate-500 text-xs mb-1.5 uppercase tracking-wide">
-              To
-            </label>
+            <label className="block text-slate-500 text-xs mb-1.5 uppercase tracking-wide">To</label>
             <input
               type="date"
               value={dateTo}
@@ -325,11 +368,8 @@ export default function DealerAnalytics() {
               className="w-full bg-slate-800 border border-white/[0.08] rounded-xl px-4 py-2.5 text-white text-sm focus:outline-none focus:border-cyan-500/60 focus:ring-1 focus:ring-cyan-500/40 transition"
             />
           </div>
-          {/* Caller */}
           <div>
-            <label className="block text-slate-500 text-xs mb-1.5 uppercase tracking-wide">
-              Caller
-            </label>
+            <label className="block text-slate-500 text-xs mb-1.5 uppercase tracking-wide">Caller</label>
             <select
               value={callerFilter}
               onChange={(e) => setCallerFilter(e.target.value)}
@@ -337,17 +377,12 @@ export default function DealerAnalytics() {
             >
               <option value="all">All Callers</option>
               {callers.map((c) => (
-                <option key={c.id} value={c.id}>
-                  {c.full_name ?? c.email}
-                </option>
+                <option key={c.id} value={c.id}>{c.full_name ?? c.email}</option>
               ))}
             </select>
           </div>
-          {/* Service Type */}
           <div>
-            <label className="block text-slate-500 text-xs mb-1.5 uppercase tracking-wide">
-              Service Type
-            </label>
+            <label className="block text-slate-500 text-xs mb-1.5 uppercase tracking-wide">Service Type</label>
             <select
               value={serviceFilter}
               onChange={(e) => setServiceFilter(e.target.value)}
@@ -355,9 +390,7 @@ export default function DealerAnalytics() {
             >
               <option value="all">All Services</option>
               {serviceTypes.map((s) => (
-                <option key={s} value={s}>
-                  {s}
-                </option>
+                <option key={s} value={s}>{s}</option>
               ))}
             </select>
           </div>
@@ -378,10 +411,9 @@ export default function DealerAnalytics() {
       <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-5 gap-5 mb-8">
         {summaryCards.map((card, i) => {
           const Icon = card.icon;
-          const pct =
-            summary.total > 0 && card.label !== 'Total Calls'
-              ? ((card.value / summary.total) * 100).toFixed(1)
-              : null;
+          const pct = summary.total > 0 && card.label !== 'Total Calls'
+            ? ((card.value / summary.total) * 100).toFixed(1)
+            : null;
           return (
             <motion.div
               key={card.label}
@@ -434,33 +466,18 @@ export default function DealerAnalytics() {
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-white/[0.06]">
-                  <th className="text-left text-slate-400 font-medium px-6 py-3 uppercase text-xs tracking-wide">
-                    Caller
-                  </th>
-                  <th className="text-right text-slate-400 font-medium px-6 py-3 uppercase text-xs tracking-wide">
-                    Total
-                  </th>
-                  <th className="text-right text-slate-400 font-medium px-6 py-3 uppercase text-xs tracking-wide">
-                    Interested
-                  </th>
-                  <th className="text-right text-slate-400 font-medium px-6 py-3 uppercase text-xs tracking-wide">
-                    Not Interested
-                  </th>
-                  <th className="text-right text-slate-400 font-medium px-6 py-3 uppercase text-xs tracking-wide">
-                    Call Later
-                  </th>
-                  <th className="text-right text-slate-400 font-medium px-6 py-3 uppercase text-xs tracking-wide">
-                    No Answer
-                  </th>
-                  <th className="text-right text-slate-400 font-medium px-6 py-3 uppercase text-xs tracking-wide">
-                    Conv. %
-                  </th>
+                  <th className="text-left text-slate-400 font-medium px-6 py-3 uppercase text-xs tracking-wide">Caller</th>
+                  <th className="text-right text-slate-400 font-medium px-6 py-3 uppercase text-xs tracking-wide">Total</th>
+                  <th className="text-right text-slate-400 font-medium px-6 py-3 uppercase text-xs tracking-wide">Interested</th>
+                  <th className="text-right text-slate-400 font-medium px-6 py-3 uppercase text-xs tracking-wide">Not Interested</th>
+                  <th className="text-right text-slate-400 font-medium px-6 py-3 uppercase text-xs tracking-wide">Call Later</th>
+                  <th className="text-right text-slate-400 font-medium px-6 py-3 uppercase text-xs tracking-wide">No Answer</th>
+                  <th className="text-right text-slate-400 font-medium px-6 py-3 uppercase text-xs tracking-wide">Conv. %</th>
                 </tr>
               </thead>
               <tbody>
                 {callerStats.map((row, i) => {
-                  const conv =
-                    row.total > 0 ? ((row.interested / row.total) * 100).toFixed(1) : '0.0';
+                  const conv = row.total > 0 ? ((row.interested / row.total) * 100).toFixed(1) : '0.0';
                   return (
                     <motion.tr
                       key={row.caller_id}
@@ -480,26 +497,16 @@ export default function DealerAnalytics() {
                         </div>
                       </td>
                       <td className="px-6 py-4 text-right text-white font-semibold">{row.total}</td>
-                      <td className="px-6 py-4 text-right text-emerald-400 font-medium">
-                        {row.interested}
-                      </td>
-                      <td className="px-6 py-4 text-right text-red-400 font-medium">
-                        {row.notInterested}
-                      </td>
-                      <td className="px-6 py-4 text-right text-amber-400 font-medium">
-                        {row.callLater}
-                      </td>
+                      <td className="px-6 py-4 text-right text-emerald-400 font-medium">{row.interested}</td>
+                      <td className="px-6 py-4 text-right text-red-400 font-medium">{row.notInterested}</td>
+                      <td className="px-6 py-4 text-right text-amber-400 font-medium">{row.callLater}</td>
                       <td className="px-6 py-4 text-right text-slate-400">{row.noAnswer}</td>
                       <td className="px-6 py-4 text-right">
-                        <span
-                          className={`font-semibold ${
-                            Number(conv) >= 30
-                              ? 'text-emerald-400'
-                              : Number(conv) >= 15
-                              ? 'text-amber-400'
-                              : 'text-red-400'
-                          }`}
-                        >
+                        <span className={`font-semibold ${
+                          Number(conv) >= 30 ? 'text-emerald-400'
+                          : Number(conv) >= 15 ? 'text-amber-400'
+                          : 'text-red-400'
+                        }`}>
                           {conv}%
                         </span>
                       </td>
@@ -541,21 +548,11 @@ export default function DealerAnalytics() {
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-white/[0.06]">
-                  <th className="text-left text-slate-400 font-medium px-6 py-3 uppercase text-xs tracking-wide">
-                    Customer
-                  </th>
-                  <th className="text-left text-slate-400 font-medium px-6 py-3 uppercase text-xs tracking-wide">
-                    Caller
-                  </th>
-                  <th className="text-left text-slate-400 font-medium px-6 py-3 uppercase text-xs tracking-wide">
-                    Action
-                  </th>
-                  <th className="text-left text-slate-400 font-medium px-6 py-3 uppercase text-xs tracking-wide">
-                    Notes
-                  </th>
-                  <th className="text-left text-slate-400 font-medium px-6 py-3 uppercase text-xs tracking-wide">
-                    Date
-                  </th>
+                  <th className="text-left text-slate-400 font-medium px-6 py-3 uppercase text-xs tracking-wide">Customer</th>
+                  <th className="text-left text-slate-400 font-medium px-6 py-3 uppercase text-xs tracking-wide">Caller</th>
+                  <th className="text-left text-slate-400 font-medium px-6 py-3 uppercase text-xs tracking-wide">Action</th>
+                  <th className="text-left text-slate-400 font-medium px-6 py-3 uppercase text-xs tracking-wide">Notes</th>
+                  <th className="text-left text-slate-400 font-medium px-6 py-3 uppercase text-xs tracking-wide">Date</th>
                 </tr>
               </thead>
               <tbody>
@@ -568,22 +565,17 @@ export default function DealerAnalytics() {
                     className="border-b border-white/[0.04] hover:bg-white/[0.02] transition-colors"
                   >
                     <td className="px-6 py-3">
-                      <p className="text-white font-medium">{log.customer_name ?? '—'}</p>
-                      <p className="text-slate-500 text-xs">{log.phone ?? ''}</p>
+                      <p className="text-white font-medium">{log.lead?.customer_name ?? '—'}</p>
+                      <p className="text-slate-500 text-xs">{log.lead?.phone ?? ''}</p>
                     </td>
                     <td className="px-6 py-3 text-slate-300 text-sm">{log.caller_name}</td>
-                    <td className="px-6 py-3">
-                      <ActionBadge action={log.action} />
-                    </td>
+                    <td className="px-6 py-3"><ActionBadge action={log.action} /></td>
                     <td className="px-6 py-3 text-slate-400 text-xs max-w-[200px] truncate">
                       {log.excuse_notes ?? '—'}
                     </td>
                     <td className="px-6 py-3 text-slate-400 text-xs whitespace-nowrap">
                       {new Date(log.called_at).toLocaleString('en-IN', {
-                        day: 'numeric',
-                        month: 'short',
-                        hour: '2-digit',
-                        minute: '2-digit',
+                        day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit',
                       })}
                     </td>
                   </motion.tr>

@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import {
-  Phone, PhoneCall, Calendar, Save, Filter, X, PhoneOff,
+  Phone, PhoneCall, Calendar, Save, Filter, X, PhoneOff, ChevronDown,
 } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { supabase } from '../../lib/supabase';
@@ -21,44 +21,51 @@ const OUTCOMES: { label: string; action: CallAction; status: LeadStatus }[] = [
 
 function fmtDate(d: string | null) {
   if (!d) return null;
+  // Dates are stored as YYYY-MM-DD (date column, no timezone). Parse as local.
   try {
     const [y, m, day] = d.split('-');
-    return new Date(Number(y), Number(m) - 1, Number(day)).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
+    return new Date(Number(y), Number(m) - 1, Number(day)).toLocaleDateString('en-IN', {
+      day: '2-digit', month: 'short', year: 'numeric',
+    });
   } catch {
     return d;
   }
 }
 
-// Robust blank check — hides null, empty, whitespace, and placeholder strings
-function hasValue(v: unknown): boolean {
-  if (v === null || v === undefined) return false;
-  const s = String(v).trim();
-  if (s === '' || s === '-' || s.toLowerCase() === 'null' || s.toLowerCase() === 'undefined' || s.toLowerCase() === 'na' || s.toLowerCase() === 'n/a') return false;
-  return true;
-}
-
 function Field({ label, value }: { label: string; value: string | null | undefined }) {
-  if (!hasValue(value)) return null;
+  // Per requirement #2: show everything, including blanks, so callers see the full row.
+  const display = value === null || value === undefined ? '' : String(value).trim();
   return (
     <div className="min-w-0">
       <p className="text-[10px] font-medium text-slate-500 uppercase tracking-wider">{label}</p>
-      <p className="text-sm text-slate-200 mt-0.5 break-words">{String(value).trim()}</p>
+      <p className="text-sm text-slate-200 mt-0.5 break-words">
+        {display !== '' ? display : <span className="text-slate-600">—</span>}
+      </p>
     </div>
   );
 }
 
-type WorkspaceState = 'loading' | 'has_lead' | 'no_leads_for_date' | 'all_done';
+type WorkspaceState = 'loading' | 'has_lead' | 'no_leads_for_filter' | 'all_done';
+
+interface FilterOptions {
+  dates: string[];
+  serviceTypes: string[];
+}
 
 export default function CallerWorkspace() {
   const { profile } = useAuth();
   const navigate = useNavigate();
 
   const [filterDate, setFilterDate] = useState('');
-  const [showDatePicker, setShowDatePicker] = useState(false);
+  const [filterServiceType, setFilterServiceType] = useState('');
+  const [showDateDropdown, setShowDateDropdown] = useState(false);
+  const [showServiceDropdown, setShowServiceDropdown] = useState(false);
 
   const [wsState, setWsState] = useState<WorkspaceState>('loading');
   const [lead, setLead] = useState<Lead | null>(null);
   const [remainingCount, setRemainingCount] = useState(0);
+
+  const [filterOptions, setFilterOptions] = useState<FilterOptions>({ dates: [], serviceTypes: [] });
 
   const [selectedOutcome, setSelectedOutcome] = useState('');
   const [notes, setNotes] = useState('');
@@ -66,6 +73,25 @@ export default function CallerWorkspace() {
   const [saving, setSaving] = useState(false);
 
   const lockedLeadId = useRef<string | null>(null);
+
+  // Fetch the distinct next_service_date and next_service_type values for the filter dropdowns.
+  const loadFilterOptions = useCallback(async () => {
+    if (!profile?.dealer_id) return;
+    const { data } = await supabase
+      .from('leads')
+      .select('next_service_date, next_service_type')
+      .eq('dealer_id', profile.dealer_id)
+      .eq('status', 'pending')
+      .is('locked_by', null);
+
+    const dates = Array.from(
+      new Set((data ?? []).map((r) => r.next_service_date).filter(Boolean) as string[]),
+    ).sort();
+    const serviceTypes = Array.from(
+      new Set((data ?? []).map((r) => r.next_service_type).filter(Boolean) as string[]),
+    ).sort();
+    setFilterOptions({ dates, serviceTypes });
+  }, [profile?.dealer_id]);
 
   const fetchNextLead = useCallback(async (releasedId?: string) => {
     if (!profile?.dealer_id || !profile?.id) return;
@@ -91,9 +117,9 @@ export default function CallerWorkspace() {
       .eq('status', 'pending')
       .is('locked_by', null);
 
-    if (filterDate) {
-      query = query.eq('next_service_date', filterDate);
-    }
+    // Date column is DATE (YYYY-MM-DD) — exact string match avoids timezone skew.
+    if (filterDate) query = query.eq('next_service_date', filterDate);
+    if (filterServiceType) query = query.eq('next_service_type', filterServiceType);
 
     const { data } = await query
       .order('sort_order', { ascending: true })
@@ -116,6 +142,7 @@ export default function CallerWorkspace() {
         .eq('status', 'pending')
         .is('locked_by', null);
       if (filterDate) countQ = countQ.eq('next_service_date', filterDate);
+      if (filterServiceType) countQ = countQ.eq('next_service_type', filterServiceType);
       const { count } = await countQ;
       setRemainingCount(count ?? 0);
       setWsState('has_lead');
@@ -123,12 +150,14 @@ export default function CallerWorkspace() {
       setLead(null);
       lockedLeadId.current = null;
       setRemainingCount(0);
-      setWsState(filterDate ? 'no_leads_for_date' : 'all_done');
+      setWsState(filterDate || filterServiceType ? 'no_leads_for_filter' : 'all_done');
     }
-  }, [profile?.dealer_id, profile?.id, filterDate]);
+  }, [profile?.dealer_id, profile?.id, filterDate, filterServiceType]);
 
+  useEffect(() => { loadFilterOptions(); }, [loadFilterOptions]);
   useEffect(() => { fetchNextLead(); }, [fetchNextLead]);
 
+  // Release the current lead's lock when the caller unmounts.
   useEffect(() => {
     return () => {
       if (lockedLeadId.current && profile?.id) {
@@ -166,6 +195,7 @@ export default function CallerWorkspace() {
 
       lockedLeadId.current = null;
       toast.success('Call logged');
+      loadFilterOptions();
       fetchNextLead(lead.id);
     } catch (err: unknown) {
       toast.error(err instanceof Error ? err.message : 'Failed to save call');
@@ -178,48 +208,108 @@ export default function CallerWorkspace() {
     fetchNextLead(lead.id);
   }
 
+  function clearFilters() {
+    setFilterDate('');
+    setFilterServiceType('');
+    setShowDateDropdown(false);
+    setShowServiceDropdown(false);
+  }
+
+  const hasActiveFilter = filterDate || filterServiceType;
+
   const filterBar = (
     <div className="bg-slate-900/80 backdrop-blur border-b border-white/[0.06] px-5 py-2.5 flex items-center gap-2 flex-wrap sticky top-0 z-10">
-      <button
-        onClick={() => setShowDatePicker((s) => !s)}
-        className={`flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-lg border transition-colors ${
-          filterDate
-            ? 'border-cyan-500/50 bg-cyan-500/10 text-cyan-400 font-medium'
-            : 'border-white/[0.08] text-slate-400 hover:border-white/[0.16] hover:text-slate-200'
-        }`}
-      >
-        <Filter size={14} />
-        {filterDate ? `Next Service: ${fmtDate(filterDate)}` : 'Filter by Next Service Date'}
-      </button>
-
-      {filterDate && (
+      {/* Date filter dropdown */}
+      <div className="relative">
         <button
-          onClick={() => { setFilterDate(''); setShowDatePicker(false); }}
+          onClick={() => { setShowDateDropdown((s) => !s); setShowServiceDropdown(false); }}
+          className={`flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-lg border transition-colors ${
+            filterDate
+              ? 'border-cyan-500/50 bg-cyan-500/10 text-cyan-400 font-medium'
+              : 'border-white/[0.08] text-slate-400 hover:border-white/[0.16] hover:text-slate-200'
+          }`}
+        >
+          <Filter size={14} />
+          {filterDate ? `Date: ${fmtDate(filterDate)}` : 'Next Service Date'}
+          <ChevronDown size={12} />
+        </button>
+        {showDateDropdown && (
+          <div className="absolute top-full left-0 mt-1 w-56 max-h-72 overflow-y-auto bg-slate-800 border border-white/[0.08] rounded-xl shadow-2xl z-20 py-1">
+            <button
+              onClick={() => { setFilterDate(''); setShowDateDropdown(false); }}
+              className="w-full text-left px-3 py-2 text-sm text-slate-400 hover:bg-white/[0.06] hover:text-white transition-colors"
+            >
+              All Dates
+            </button>
+            {filterOptions.dates.map((d) => (
+              <button
+                key={d}
+                onClick={() => { setFilterDate(d); setShowDateDropdown(false); }}
+                className={`w-full text-left px-3 py-2 text-sm transition-colors ${
+                  filterDate === d ? 'text-cyan-400 bg-cyan-500/10' : 'text-slate-300 hover:bg-white/[0.06] hover:text-white'
+                }`}
+              >
+                {fmtDate(d)}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Service type filter dropdown */}
+      <div className="relative">
+        <button
+          onClick={() => { setShowServiceDropdown((s) => !s); setShowDateDropdown(false); }}
+          className={`flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-lg border transition-colors ${
+            filterServiceType
+              ? 'border-cyan-500/50 bg-cyan-500/10 text-cyan-400 font-medium'
+              : 'border-white/[0.08] text-slate-400 hover:border-white/[0.16] hover:text-slate-200'
+          }`}
+        >
+          <Filter size={14} />
+          {filterServiceType ? `Type: ${filterServiceType}` : 'Service Type'}
+          <ChevronDown size={12} />
+        </button>
+        {showServiceDropdown && (
+          <div className="absolute top-full left-0 mt-1 w-56 max-h-72 overflow-y-auto bg-slate-800 border border-white/[0.08] rounded-xl shadow-2xl z-20 py-1">
+            <button
+              onClick={() => { setFilterServiceType(''); setShowServiceDropdown(false); }}
+              className="w-full text-left px-3 py-2 text-sm text-slate-400 hover:bg-white/[0.06] hover:text-white transition-colors"
+            >
+              All Service Types
+            </button>
+            {filterOptions.serviceTypes.map((s) => (
+              <button
+                key={s}
+                onClick={() => { setFilterServiceType(s); setShowServiceDropdown(false); }}
+                className={`w-full text-left px-3 py-2 text-sm transition-colors ${
+                  filterServiceType === s ? 'text-cyan-400 bg-cyan-500/10' : 'text-slate-300 hover:bg-white/[0.06] hover:text-white'
+                }`}
+              >
+                {s}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {hasActiveFilter && (
+        <button
+          onClick={clearFilters}
           className="p-1 text-slate-500 hover:text-slate-300 rounded transition-colors"
-          title="Clear filter"
+          title="Clear filters"
         >
           <X size={15} />
         </button>
       )}
 
-      {showDatePicker && (
-        <input
-          type="date"
-          value={filterDate}
-          autoFocus
-          onChange={(e) => { setFilterDate(e.target.value); setShowDatePicker(false); }}
-          onBlur={() => setShowDatePicker(false)}
-          className="bg-slate-800 border border-white/[0.08] rounded-lg px-3 py-1.5 text-sm text-white focus:outline-none focus:border-cyan-500/50 focus:ring-1 focus:ring-cyan-500/30"
-        />
-      )}
-
-      {filterDate && wsState === 'has_lead' && (
+      {hasActiveFilter && wsState === 'has_lead' && (
         <span className="ml-auto text-xs text-slate-500">
           {remainingCount} lead{remainingCount !== 1 ? 's' : ''} remaining
         </span>
       )}
 
-      {!filterDate && (
+      {!hasActiveFilter && (
         <button
           onClick={() => navigate('/caller/followups')}
           className="ml-auto flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-lg border border-white/[0.08] text-slate-400 hover:border-white/[0.16] hover:text-slate-200 transition-colors"
@@ -241,7 +331,7 @@ export default function CallerWorkspace() {
     );
   }
 
-  if (wsState === 'no_leads_for_date') {
+  if (wsState === 'no_leads_for_filter') {
     return (
       <div className="min-h-[calc(100vh-56px)] bg-[#080C14] flex flex-col">
         {filterBar}
@@ -254,26 +344,17 @@ export default function CallerWorkspace() {
             <div className="w-16 h-16 bg-slate-800/80 border border-white/[0.08] rounded-2xl flex items-center justify-center mx-auto mb-4">
               <Calendar size={28} className="text-slate-500" />
             </div>
-            <h2 className="text-lg font-semibold text-white">No leads for this date</h2>
+            <h2 className="text-lg font-semibold text-white">No leads match this filter</h2>
             <p className="text-slate-500 text-sm mt-2">
-              There are no pending leads with a next service date of{' '}
-              <span className="font-medium text-slate-300">{fmtDate(filterDate)}</span>.
+              There are no pending leads for the selected date and/or service type.
             </p>
-            <p className="text-slate-600 text-xs mt-1">Try selecting a different date.</p>
-            <div className="flex gap-2 justify-center mt-6">
-              <button
-                onClick={() => setFilterDate('')}
-                className="px-4 py-2 border border-white/[0.08] text-slate-300 rounded-lg text-sm hover:bg-white/[0.04] transition-colors"
-              >
-                Clear Filter
-              </button>
-              <button
-                onClick={() => setShowDatePicker(true)}
-                className="px-4 py-2 bg-gradient-to-r from-cyan-500 to-blue-600 text-white rounded-lg text-sm font-medium hover:shadow-lg hover:shadow-cyan-500/20 transition-all"
-              >
-                Pick Another Date
-              </button>
-            </div>
+            <p className="text-slate-600 text-xs mt-1">Try a different filter or clear it.</p>
+            <button
+              onClick={clearFilters}
+              className="mt-6 px-4 py-2 border border-white/[0.08] text-slate-300 rounded-lg text-sm hover:bg-white/[0.04] transition-colors"
+            >
+              Clear Filters
+            </button>
           </div>
         </motion.div>
       </div>
@@ -296,7 +377,7 @@ export default function CallerWorkspace() {
             <h2 className="text-xl font-semibold text-white">All caught up!</h2>
             <p className="text-slate-500 mt-1 text-sm">All pending leads have been processed.</p>
             <button
-              onClick={() => fetchNextLead()}
+              onClick={() => { loadFilterOptions(); fetchNextLead(); }}
               className="mt-5 px-5 py-2.5 bg-gradient-to-r from-cyan-500 to-blue-600 text-white rounded-lg text-sm font-medium hover:shadow-lg hover:shadow-cyan-500/20 transition-all"
             >
               Refresh
@@ -309,15 +390,8 @@ export default function CallerWorkspace() {
 
   if (!lead) return null;
 
-  const extraEntries = Object.entries(lead.extra_data ?? {}).filter(([, v]) => hasValue(v));
-
-  const hasVehicleInfo = hasValue(lead.vehicle_number) || hasValue(lead.vehicle_model);
-  const hasServiceInfo =
-    hasValue(lead.next_service_date) || hasValue(lead.next_service_type) ||
-    hasValue(lead.service_pending_date) || hasValue(lead.service_type);
-  const hasInsurance = hasValue(lead.insurance_expiry_date);
-  const hasContactInfo = hasValue(lead.address) || hasValue(lead.email);
-  const hasExtra = extraEntries.length > 0;
+  // Per requirement #2: show ALL data. Build the metadata entries from extra_data.
+  const extraEntries = Object.entries(lead.extra_data ?? {});
 
   return (
     <div className="min-h-[calc(100vh-56px)] bg-[#080C14] flex flex-col">
@@ -326,15 +400,15 @@ export default function CallerWorkspace() {
       <div className="py-5 px-3 flex-1">
         <div className="max-w-xl mx-auto space-y-3">
 
-          {filterDate && (
+          {hasActiveFilter && (
             <div className="text-center">
               <span className="inline-flex items-center gap-1 text-xs bg-cyan-500/10 border border-cyan-500/20 text-cyan-400 px-3 py-1 rounded-full font-medium">
-                {remainingCount} lead{remainingCount !== 1 ? 's' : ''} pending for {fmtDate(filterDate)}
+                {remainingCount} lead{remainingCount !== 1 ? 's' : ''} remaining
               </span>
             </div>
           )}
 
-          {/* Lead card */}
+          {/* Lead card — shows every field */}
           <motion.div
             key={lead.id}
             initial={{ opacity: 0, y: 12 }}
@@ -347,9 +421,9 @@ export default function CallerWorkspace() {
               <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0">
                   <h2 className="text-white font-bold text-xl leading-tight truncate">
-                    {hasValue(lead.customer_name) ? lead.customer_name : 'Unknown Customer'}
+                    {lead.customer_name || 'Unknown Customer'}
                   </h2>
-                  {hasValue(lead.phone) && (
+                  {lead.phone && (
                     <a
                       href={`tel:${lead.phone}`}
                       className="inline-flex items-center gap-1.5 text-cyan-400 hover:text-cyan-300 text-base mt-0.5 font-mono transition-colors"
@@ -359,7 +433,7 @@ export default function CallerWorkspace() {
                     </a>
                   )}
                 </div>
-                {hasValue(lead.phone) && (
+                {lead.phone && (
                   <a
                     href={`tel:${lead.phone}`}
                     className="shrink-0 bg-gradient-to-br from-cyan-500 to-blue-600 text-white rounded-full p-3 hover:shadow-lg hover:shadow-cyan-500/30 transition-all"
@@ -370,46 +444,38 @@ export default function CallerWorkspace() {
               </div>
             </div>
 
-            {/* Body — only non-blank sections render */}
+            {/* Body — all standard fields + metadata */}
             <div className="p-4 space-y-4">
-              {hasVehicleInfo && (
-                <section>
-                  <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2">Vehicle Details</p>
-                  <div className="grid grid-cols-2 gap-3">
-                    <Field label="Registration No." value={lead.vehicle_number} />
-                    <Field label="Model" value={lead.vehicle_model} />
-                  </div>
-                </section>
-              )}
+              <section>
+                <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2">Vehicle Details</p>
+                <div className="grid grid-cols-2 gap-3">
+                  <Field label="Registration No." value={lead.vehicle_number} />
+                  <Field label="Model" value={lead.vehicle_model} />
+                </div>
+              </section>
 
-              {hasServiceInfo && (
-                <section className="bg-amber-500/[0.08] border border-amber-500/20 rounded-xl p-3">
-                  <p className="text-[10px] font-bold text-amber-400/80 uppercase tracking-widest mb-2">Service Info</p>
-                  <div className="grid grid-cols-2 gap-3">
-                    <Field label="Next Service Date" value={fmtDate(lead.next_service_date)} />
-                    <Field label="Next Service Type" value={lead.next_service_type} />
-                    <Field label="Last Service Date" value={fmtDate(lead.service_pending_date)} />
-                    <Field label="Last Service Type" value={lead.service_type} />
-                  </div>
-                </section>
-              )}
+              <section className="bg-amber-500/[0.08] border border-amber-500/20 rounded-xl p-3">
+                <p className="text-[10px] font-bold text-amber-400/80 uppercase tracking-widest mb-2">Service Info</p>
+                <div className="grid grid-cols-2 gap-3">
+                  <Field label="Next Service Date" value={fmtDate(lead.next_service_date)} />
+                  <Field label="Next Service Type" value={lead.next_service_type} />
+                  <Field label="Last Service Date" value={fmtDate(lead.service_pending_date)} />
+                  <Field label="Last Service Type" value={lead.service_type} />
+                </div>
+              </section>
 
-              {hasInsurance && (
-                <section className="bg-red-500/[0.08] border border-red-500/20 rounded-xl p-3">
-                  <Field label="Insurance Expiry" value={fmtDate(lead.insurance_expiry_date)} />
-                </section>
-              )}
+              <section className="bg-red-500/[0.08] border border-red-500/20 rounded-xl p-3">
+                <Field label="Insurance Expiry" value={fmtDate(lead.insurance_expiry_date)} />
+              </section>
 
-              {hasContactInfo && (
-                <section>
-                  <div className="grid grid-cols-1 gap-2">
-                    <Field label="Address" value={lead.address} />
-                    <Field label="Email" value={lead.email} />
-                  </div>
-                </section>
-              )}
+              <section>
+                <div className="grid grid-cols-1 gap-2">
+                  <Field label="Address" value={lead.address} />
+                  <Field label="Email" value={lead.email} />
+                </div>
+              </section>
 
-              {hasExtra && (
+              {extraEntries.length > 0 && (
                 <section className="bg-white/[0.03] border border-white/[0.06] rounded-xl p-3">
                   <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2">Additional Info</p>
                   <div className="grid grid-cols-2 gap-3">
@@ -503,5 +569,3 @@ export default function CallerWorkspace() {
     </div>
   );
 }
-
-

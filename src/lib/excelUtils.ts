@@ -120,3 +120,68 @@ export function computeNextServiceDate(lastServiceDate: string | null): string |
   d.setMonth(d.getMonth() + 3)
   return d.toISOString().split('T')[0]
 }
+
+export interface MappedLeadFields {
+  customer_name: string | null;
+  phone: string | null;
+  vehicle_number: string | null;
+  vehicle_model: string | null;
+  service_type: string | null;
+  service_pending_date: string | null;
+  insurance_expiry_date: string | null;
+  address: string | null;
+  email: string | null;
+  next_service_date: string | null;
+  next_service_type: string | null;
+  extra_data: Record<string, string> | null;
+}
+
+/**
+ * Auto-maps a raw Excel/CSV row to lead fields using the auto-detected mapping.
+ * ALL non-standard columns are stored in extra_data (the JSONB metadata column),
+ * including blank ones as empty strings so callers see every original column.
+ */
+export function buildLeadFromRow(
+  row: Record<string, unknown>,
+  mapping: ColumnMapping,
+): MappedLeadFields {
+  const mappedCols = new Set(Object.values(mapping).filter(Boolean));
+  const extra: Record<string, string> = {};
+  for (const [k, v] of Object.entries(row)) {
+    if (!mappedCols.has(k)) {
+      const s = v === null || v === undefined ? '' : String(v).trim();
+      extra[k] = s;
+    }
+  }
+  const get = (col: string): string | null => {
+    if (!col) return null;
+    const val = row[col];
+    if (val === null || val === undefined) return null;
+    const s = String(val).trim();
+    return s !== '' ? s : null;
+  };
+
+  const lastServiceDate = parseExcelDate(
+    mapping.service_pending_date ? row[mapping.service_pending_date] : null,
+  );
+  const nextServiceDate =
+    parseExcelDate(mapping.next_service_date ? row[mapping.next_service_date] : null) ??
+    computeNextServiceDate(lastServiceDate);
+
+  return {
+    customer_name: get(mapping.customer_name),
+    phone: get(mapping.phone),
+    vehicle_number: get(mapping.vehicle_number),
+    vehicle_model: get(mapping.vehicle_model),
+    service_type: get(mapping.service_type),
+    service_pending_date: lastServiceDate,
+    insurance_expiry_date: parseExcelDate(
+      mapping.insurance_expiry_date ? row[mapping.insurance_expiry_date] : null,
+    ),
+    address: get(mapping.address),
+    email: get(mapping.email),
+    next_service_date: nextServiceDate,
+    next_service_type: get(mapping.next_service_type),
+    extra_data: Object.keys(extra).length > 0 ? extra : null,
+  };
+}
