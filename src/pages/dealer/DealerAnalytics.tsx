@@ -16,6 +16,7 @@ import { supabase } from '../../lib/supabase';
 import { useAuth } from '../../contexts/AuthContext';
 import type { Profile, CallAction } from '../../types/database';
 import { getNextServiceDate, getNextServiceType } from '../../types/database';
+import { resolvePhone, isPhoneKey } from '../../lib/excelUtils';
 import toast from 'react-hot-toast';
 
 /* ─── Types ─────────────────────────────────────────────────────────────── */
@@ -100,14 +101,11 @@ const ACTION_LABELS: Record<CallAction, string> = {
 /** Standard column labels for export, in the order they were uploaded. */
 const STANDARD_EXPORT_FIELDS: { key: keyof LeadRow; label: string }[] = [
   { key: 'customer_name', label: 'Customer Name' },
-  { key: 'phone', label: 'Phone' },
+  { key: 'phone', label: 'Phone Number' },
   { key: 'vehicle_number', label: 'Vehicle Number' },
   { key: 'vehicle_model', label: 'Vehicle Model' },
   { key: 'service_type', label: 'Service Type' },
   { key: 'service_pending_date', label: 'Service Pending Date' },
-  { key: 'insurance_expiry_date', label: 'Insurance Expiry Date' },
-  { key: 'address', label: 'Address' },
-  { key: 'email', label: 'Email' },
 ];
 
 export default function DealerAnalytics() {
@@ -243,7 +241,10 @@ export default function DealerAnalytics() {
       for (const log of filteredLogs) {
         const extra = log.lead?.extra_data;
         if (extra && typeof extra === 'object') {
-          for (const key of Object.keys(extra)) metadataKeys.add(key);
+          for (const key of Object.keys(extra)) {
+            if (isPhoneKey(key)) continue;
+            metadataKeys.add(key);
+          }
         }
       }
       const sortedMetadataKeys = Array.from(metadataKeys).sort();
@@ -251,10 +252,14 @@ export default function DealerAnalytics() {
       const exportData = filteredLogs.map((log) => {
         const row: Record<string, string> = {};
 
-        // 1. Standard columns from the original upload
+        // 1. Standard columns from the original upload (phone uses extra_data fallback)
         for (const field of STANDARD_EXPORT_FIELDS) {
-          const val = log.lead?.[field.key];
-          row[field.label] = val === null || val === undefined ? '' : String(val);
+          if (field.key === 'phone') {
+            row[field.label] = resolvePhone(log.lead) ?? '';
+          } else {
+            const val = log.lead?.[field.key];
+            row[field.label] = val === null || val === undefined ? '' : String(val);
+          }
         }
 
         // Next Service Date / Type are stored inside extra_data (jsonb).

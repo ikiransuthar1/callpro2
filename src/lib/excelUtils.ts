@@ -122,6 +122,25 @@ export function autoDetectMapping(headers: string[]): ColumnMapping {
   return mapping
 }
 
+// Common column names for phone number in uploaded data.
+const PHONE_EXTRA_KEYS = ['contact number', 'phone', 'mobile', 'mobile number', 'contact no', 'phone number', 'mob no', 'mob', 'contact', 'phone no'];
+
+/** Resolve the best available phone number for a lead. Falls back to extra_data. */
+export function resolvePhone(lead: { phone?: string | null; extra_data?: Record<string, unknown> | null } | null): string | null {
+  if (!lead) return null;
+  if (lead.phone?.trim()) return lead.phone.trim();
+  if (!lead.extra_data) return null;
+  for (const [k, v] of Object.entries(lead.extra_data)) {
+    if (PHONE_EXTRA_KEYS.includes(k.toLowerCase().trim()) && v) return String(v).trim();
+  }
+  return null;
+}
+
+/** Whether a key from extra_data is a phone-number column (to suppress from other grids). */
+export function isPhoneKey(key: string): boolean {
+  return PHONE_EXTRA_KEYS.includes(key.toLowerCase().trim());
+}
+
 export function computeNextServiceDate(lastServiceDate: string | null): string | null {
   if (!lastServiceDate) return null
   const d = new Date(lastServiceDate)
