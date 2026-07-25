@@ -456,6 +456,26 @@ export default function CallerWorkspace() {
             {/* Vehicle + service details */}
             <div className="p-5 space-y-4">
 
+              {/* Contact actions — always visible on every device */}
+              {displayPhone && (
+                <div className="grid grid-cols-2 gap-3">
+                  <a
+                    href={`tel:${displayPhone}`}
+                    className="flex items-center justify-center gap-2 bg-emerald-500 hover:bg-emerald-400 active:scale-95 text-white font-bold py-3.5 rounded-xl text-base transition-all hover:shadow-lg hover:shadow-emerald-500/30"
+                  >
+                    <Phone size={18} fill="white" /> Call Now
+                  </a>
+                  <a
+                    href={whatsappUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="flex items-center justify-center gap-2 bg-[#25D366] hover:bg-[#20b955] active:scale-95 text-white font-bold py-3.5 rounded-xl text-base transition-all hover:shadow-lg hover:shadow-green-500/30"
+                  >
+                    <MessageCircle size={18} fill="white" stroke="none" /> WhatsApp
+                  </a>
+                </div>
+              )}
+
               {/* Vehicle & Last Service — two side-by-side cards */}
               <div className="grid grid-cols-2 gap-3">
                 <div className="bg-white/[0.03] border border-white/[0.07] rounded-xl p-3">
@@ -513,25 +533,6 @@ export default function CallerWorkspace() {
                 </div>
               )}
 
-              {/* Call & WhatsApp action buttons — always shown when a phone is available */}
-              {displayPhone && (
-                <div className="grid grid-cols-2 gap-3 pt-1">
-                  <a
-                    href={`tel:${displayPhone}`}
-                    className="flex items-center justify-center gap-2 bg-emerald-500 hover:bg-emerald-400 active:scale-95 text-white font-bold py-3.5 rounded-xl text-base transition-all hover:shadow-lg hover:shadow-emerald-500/30"
-                  >
-                    <Phone size={18} fill="white" /> Call Now
-                  </a>
-                  <a
-                    href={whatsappUrl}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="flex items-center justify-center gap-2 bg-[#25D366] hover:bg-[#20b955] active:scale-95 text-white font-bold py-3.5 rounded-xl text-base transition-all hover:shadow-lg hover:shadow-green-500/30"
-                  >
-                    <MessageCircle size={18} fill="white" stroke="none" /> WhatsApp
-                  </a>
-                </div>
-              )}
             </div>
           </div>
 
