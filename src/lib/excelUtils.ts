@@ -3,38 +3,47 @@ export function parseExcelDate(val: unknown): string | null {
 
   if (typeof val === 'number') {
     if (val < 1000) return null
+    // Reject km readings and prices (e.g. 29500, 356008) — only plausible
+    // Excel date serials (2000-01-01 = 36526 through 2099-12-31 = 73050).
+    if (val < 36526 || val > 73050) return null
     const d = new Date(Math.round((val - 25569) * 86400 * 1000))
     return isNaN(d.getTime()) ? null : d.toISOString().split('T')[0]
   }
 
   const str = String(val).trim()
   if (!str) return null
+  // Reject strings that are purely numeric (km, prices with commas, etc.)
+  if (/^[\d,]+$/.test(str)) return null
+  // Already ISO format
   if (/^\d{4}-\d{2}-\d{2}$/.test(str)) return str
-  if (/^\d{4,5}$/.test(str)) {
+  // Numeric serial as string
+  if (/^\d{5}$/.test(str)) {
     const n = parseInt(str)
-    const d = new Date(Math.round((n - 25569) * 86400 * 1000))
-    if (!isNaN(d.getTime())) return d.toISOString().split('T')[0]
+    if (n >= 36526 && n <= 73050) {
+      const d = new Date(Math.round((n - 25569) * 86400 * 1000))
+      if (!isNaN(d.getTime())) return d.toISOString().split('T')[0]
+    }
+    return null
   }
 
-  const m1 = str.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/)
-  if (m1) {
-    const [, mo, d, y] = m1
-    const year = y.length === 2 ? (parseInt(y) > 50 ? '19' + y : '20' + y) : y
-    const dt = new Date(`${year}-${mo.padStart(2, '0')}-${d.padStart(2, '0')}`)
+  // DD/MM/YYYY or DD-MM-YYYY (Indian / European format — day first)
+  const dmyMatch = str.match(/^(\d{1,2})[\/\-\.](\d{1,2})[\/\-\.](\d{2,4})$/)
+  if (dmyMatch) {
+    const [, day, month, yr] = dmyMatch
+    const year = yr.length === 2 ? (parseInt(yr) > 50 ? '19' + yr : '20' + yr) : yr
+    const d = parseInt(day); const m = parseInt(month)
+    // If day > 12 it must be DD/MM, otherwise assume DD/MM (Indian default)
+    const isoDay = String(d).padStart(2, '0')
+    const isoMon = String(m).padStart(2, '0')
+    const dt = new Date(`${year}-${isoMon}-${isoDay}`)
     if (!isNaN(dt.getTime())) return dt.toISOString().split('T')[0]
   }
 
-  const m2 = str.match(/^(\d{1,2})[-\/](\d{1,2})[-\/](\d{4})$/)
-  if (m2) {
-    const [, d, mo, y] = m2
-    const dt = new Date(`${y}-${mo.padStart(2, '0')}-${d.padStart(2, '0')}`)
-    if (!isNaN(dt.getTime())) return dt.toISOString().split('T')[0]
-  }
-
-  const m3 = str.match(/^(\d{1,2})[\/\-\s]([A-Za-z]{3,})[\/\-\s](\d{2,4})$/)
-  if (m3) {
-    const [, d, mon, y] = m3
-    const year = y.length === 2 ? (parseInt(y) > 50 ? '19' + y : '20' + y) : y
+  // DD Mon YYYY  e.g. "28 Apr 2026"
+  const dmonMatch = str.match(/^(\d{1,2})[\/\-\s]([A-Za-z]{3,})[\/\-\s](\d{2,4})$/)
+  if (dmonMatch) {
+    const [, d, mon, yr] = dmonMatch
+    const year = yr.length === 2 ? (parseInt(yr) > 50 ? '19' + yr : '20' + yr) : yr
     const dt = new Date(`${mon} ${d}, ${year}`)
     if (!isNaN(dt.getTime())) return dt.toISOString().split('T')[0]
   }
@@ -149,8 +158,10 @@ export function buildLeadFromRow(
   const extra: Record<string, string> = {};
   for (const [k, v] of Object.entries(row)) {
     if (!mappedCols.has(k)) {
-      const s = v === null || v === undefined ? '' : String(v).trim();
-      extra[k] = s;
+      // Trim stray NUL bytes that appear when UTF-16 files are parsed.
+      const cleanKey = k.replace(/\u0000/g, '').trim();
+      const s = v === null || v === undefined ? '' : String(v).replace(/\u0000/g, '').trim();
+      if (cleanKey) extra[cleanKey] = s;
     }
   }
   const get = (col: string): string | null => {
@@ -158,6 +169,16 @@ export function buildLeadFromRow(
     const val = row[col];
     if (val === null || val === undefined) return null;
     const s = String(val).trim();
+    return s !== '' ? s : null;
+  };
+
+  // Phone numbers can arrive as large integers from Excel — preserve as string.
+  const getPhone = (col: string): string | null => {
+    if (!col) return null;
+    const val = row[col];
+    if (val === null || val === undefined) return null;
+    // Remove any decimal part added by Excel (e.g. 9999999999.0)
+    const s = String(typeof val === 'number' ? Math.round(val) : val).trim();
     return s !== '' ? s : null;
   };
 
@@ -170,7 +191,7 @@ export function buildLeadFromRow(
 
   return {
     customer_name: get(mapping.customer_name),
-    phone: get(mapping.phone),
+    phone: getPhone(mapping.phone),
     vehicle_number: get(mapping.vehicle_number),
     vehicle_model: get(mapping.vehicle_model),
     service_type: get(mapping.service_type),

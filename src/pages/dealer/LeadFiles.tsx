@@ -46,7 +46,13 @@ export default function LeadFiles() {
       const reader = new FileReader();
       reader.onload = (e) => {
         try {
-          const wb = read(e.target!.result, { type: 'array', cellDates: false });
+          // readAsBinaryString lets xlsx auto-detect encoding (incl. UTF-16 BOM)
+          // which is required for files exported from Indian DMS platforms.
+          const wb = read(e.target!.result as string, {
+            type: 'binary',
+            cellDates: false,
+            codepage: 65001, // UTF-8 fallback; xlsx overrides when BOM present
+          });
           const ws = wb.Sheets[wb.SheetNames[0]];
           const raw: ParsedRow[] = utils.sheet_to_json(ws, { defval: '', raw: true });
           resolve(raw);
@@ -55,7 +61,7 @@ export default function LeadFiles() {
         }
       };
       reader.onerror = () => reject(new Error('Could not read the file.'));
-      reader.readAsArrayBuffer(file);
+      reader.readAsBinaryString(file);
     }).catch((err: unknown) => {
       const msg = err instanceof Error ? err.message : 'Failed to read file.';
       setState((s) => ({ ...s, step: 'idle', error: msg }));
@@ -70,8 +76,16 @@ export default function LeadFiles() {
       return;
     }
 
-    const headers = Object.keys(rows[0]);
+    const headers = Object.keys(rows[0]).map((h) => h.replace(/\u0000/g, '').trim());
     const mapping = autoDetectMapping(headers);
+    // Re-key rows so mapping lookups match cleaned headers.
+    const cleanedRows = rows.map((row) => {
+      const out: ParsedRow = {};
+      for (const [k, v] of Object.entries(row)) {
+        out[k.replace(/\u0000/g, '').trim()] = v;
+      }
+      return out;
+    });
 
     setState({
       step: 'uploading',
@@ -105,8 +119,8 @@ export default function LeadFiles() {
     let succeeded = 0;
     let failed = 0;
 
-    for (let i = 0; i < rows.length; i += BATCH) {
-      const batch = rows.slice(i, i + BATCH);
+    for (let i = 0; i < cleanedRows.length; i += BATCH) {
+      const batch = cleanedRows.slice(i, i + BATCH);
 
       const leadsToInsert = batch.map((row, idx) => {
         const fields = buildLeadFromRow(row, mapping);
@@ -122,13 +136,14 @@ export default function LeadFiles() {
       const { error: insertErr } = await supabase.from('leads').insert(leadsToInsert);
       if (insertErr) {
         console.error('Batch insert error:', insertErr);
+        toast.error(`Upload failed: ${insertErr.message}`, { duration: 6000 });
         failed += batch.length;
       } else {
         succeeded += batch.length;
       }
       setState((s) => ({
         ...s,
-        progress: Math.min(i + BATCH, rows.length),
+        progress: Math.min(i + BATCH, cleanedRows.length),
         succeeded,
         failed,
       }));
