@@ -214,11 +214,15 @@ export default function CallerWorkspace() {
       if (leadErr) throw leadErr;
 
       lockedLeadId.current = null;
+      setSelectedOutcome('');
+      setNotes('');
+      setCallback('');
       toast.success('Call logged');
       loadFilterOptions();
       fetchNextLead(lead.id);
     } catch (err: unknown) {
       toast.error(err instanceof Error ? err.message : 'Failed to save call');
+    } finally {
       setSaving(false);
     }
   }
